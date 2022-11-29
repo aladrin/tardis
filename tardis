@@ -1,0 +1,165 @@
+#!/bin/bash
+SCRIPT=${0##*/}
+
+f_usage() {
+  echo "usage: $SCRIPT [-c client] [-b bucket] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]"
+  echo "options: -r (restore)"
+  echo "         -d (dump)"
+  echo "         -D (delete)"
+  echo "         -q (query)"
+  echo "         -t tier Standard (3-5 hours)"
+  echo "         -t tier Bulk (5-12 hours)"
+}
+
+f_error() {
+  echo "$SCRIPT: $1 missing argument"
+}
+
+f_check() {
+  which $1 2>/dev/null || {
+    echo $SCRIPT: $1 not found 1>&2
+    exit 1
+  }
+}
+
+f_env() {
+  [ -z "$AWS_ACCESS_KEY_ID" ]
+  [ -z "$AWS_SECRET_ACCESS_KEY" ]
+  [ -z "$AWS_DEFAULT_REGION" ]
+  [ -z "$CLIENT" ] && CLIENT=${HOSTNAME%%.*}
+  [ -z "$BUCKET" ]
+}
+
+f_restore() {
+  [ -z "$RESTORE" ] && { f_error -f; f_usage; exit 1; }
+  [ -z "$MOUNT" ] && { f_error -m; f_usage; exit 1; }
+  [ -z "$TIER" ] && TIER=Bulk
+  f_env
+  DATA_FILE=$CLIENT/$RESTORE
+  REQUEST=\'{\"Days\":1,\"GlacierJobParameters\":{\"Tier\":\"$TIER\"}}\'
+  eval aws s3api restore-object \
+    --bucket $BUCKET \
+    --key $DATA_FILE \
+    --restore-request $REQUEST
+  QUERY=STANDARD
+  while ! f_query|fgrep -q $DATA_FILE; do
+    date
+    sleep $((60*60))
+  done
+  f_query|fgrep $DATA_FILE
+  KEY=/etc/s3dump.d/${HOST}.key
+  TOTAL=$(aws s3 ls s3://$BUCKET/$DATA_FILE|awk '{print $3}')
+  cd $MOUNT
+  aws s3 cp $BUCKET/$DATA_FILE - | \
+    tqdm --bytes --total $TOTAL| \
+    openssl enc -chacha -d -pass file:$KEY | \
+    zstd -d --stdout | \
+    restore -f - -r $MOUNT 2>/dev/null
+}
+
+f_dump() {
+  OPENSSL=$(f_check openssl)
+  OS=$(uname -s)
+  mount|fgrep  -q " $2 " || { echo ${2}: not mounted; exit 1; }
+  if [ "$OS" = Linux ]; then
+    export LD_LIBRARY_PATH=/usr/local/lib
+    DUMPDATES=/var/lib/dumpdates
+    f_check dateutils.dconv 1>/dev/null && DATECONV=$(f_check dateutils.dconv)
+    f_check tac 1>/dev/null && TAC=$(f_check tac)
+    DEVICE=$(mount|fgrep " $2 "|awk '{print $1}')
+  elif [ "$OS" = OpenBSD ]; then
+    DUMPDATES=/etc/dumpdates
+    f_check dateconv 1>/dev/null && DATECONV=$(f_check dateconv)
+    f_check gtac 1>/dev/null && TAC=$(f_check gtac)
+    DEVICE=$(mount -v|fgrep " $2 "|awk '{print $2}'|sed -e 's/(//' -e 's/)//')
+  else
+    echo Unsupported OS
+    exit 1
+  fi
+  FORMAT='%a %b %d %T %Y'
+  touch $DUMPDATES
+  $TAC $DUMPDATES |
+  while read -r LINE; do
+    LINE=( $LINE )
+    [ "${LINE[0]}" = $DEVICE ] && {
+      [ $1 -gt ${LINE[1]} ] && {
+        touch -t $(echo ${LINE[@]}|awk '{print $3,$4,$5,$6,$7}'|$DATECONV -i "$FORMAT" -f "%Y%m%d%H%M.%S") $RUNFILE
+        break
+      }
+    }
+  done
+  OPENSSL_VERSION="$($OPENSSL version)"
+  [ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
+  mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
+  KEY=/etc/${SCRIPT}.d/${HOST}.key
+  [ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }
+  LOG_FILE=/var/log/$SCRIPT
+  DGST=sha256
+  f_check aws 1>/dev/null && AWS=$(f_check aws)
+  f_check dump 1>/dev/null && DUMP=$(f_check dump)
+  f_check tqdm 1>/dev/null && TQDM=$(f_check tqdm)
+  f_check zstd 1>/dev/null && ZSTD=$(f_check zstd)
+  df $2 &>/dev/null && {
+    DATE=$(date +%Y-%m-%d_%H:%M:%S)
+    echo $(date): $@>>$LOG_FILE
+    BASE_FILE=${DATE}_${HOST}$(echo $2|sed 's/\//_/g')_$1
+    DATA_FILE=$BASE_FILE.zst.dat
+    DGST_FILE=$BASE_FILE.$DGST
+    LIST_FILE=${BASE_FILE}_list.zst.dat
+    LOCAL_LIST_FILE=/var/db/$SCRIPT/${BASE_FILE}_list.zst
+    [ -t 0 ] && echo -n "Reading inodes on $2 (dump level $1): "
+    TOTAL=$(find $2 -xdev -newer $RUNFILE -ls | \
+    tee >($ZSTD -22 --ultra --stdout | tee $LOCAL_LIST_FILE  | \
+    $OPENSSL enc -chacha -e -pass file:$KEY | \
+    $AWS s3 cp - $BUCKET/$LIST_FILE) | \
+    awk '{sum+=$7}END{print sum}')
+    [ -t 0 ] && echo DONE
+    [ -n "$TOTAL" ] || {
+      echo "${SCRIPT}: no change for $2 (dump level $1)"
+      $AWS s3 rm $BUCKET/$LIST_FILE >/dev/null
+      exit
+    } && {
+      [ -t 0 ] && TQDM="$TQDM --bytes --total $TOTAL" || TQDM=cat
+      $DUMP -$1 -u -f - $2 2>/dev/null | \
+      $TQDM | \
+      $ZSTD --long --stdout | \
+      $OPENSSL enc -chacha -e -pass file:$KEY | \
+      tee >($OPENSSL dgst -$DGST | \
+      awk -v d=$DGST -v o=$DATA_FILE '{gsub("stdin", o)} {gsub("^", toupper(d))} $1' | \
+      $AWS s3 cp - $BUCKET/$DGST_FILE) | \
+      $AWS s3 cp --storage-class DEEP_ARCHIVE --expected-size $TOTAL - $BUCKET/$DATA_FILE 2>>$LOG_FILE
+    }
+  }
+}
+
+f_query() {
+  [ $QUERY = ALL ] && QUERY="STANDARD DEEP_ARCHIVE"
+  f_env
+  for QRY in $QUERY; do
+    Q=\"Contents[?StorageClass==\'$QRY\']\"
+    eval aws s3api list-objects-v2 --bucket $BUCKET --query $Q | fgrep $CLIENT
+  done
+}
+
+f_delete() {
+  [ -z "$DELETE" ] && { f_error -f; f_usage; exit 1; }
+  f_env
+  aws s3 rm s3://$BUCKET/$CLIENT/$DELETE
+}
+
+[ $# = 0 ] && { f_usage; exit 1; }
+
+while getopts "D:c:b:q:r:t:m:d:h" OPT; do
+   case $OPT in
+    h  ) f_usage;;
+    c  ) CLIENT=$OPTARG;;
+    b  ) BUCKET=$OPTARG;;
+    t  ) TIER=$OPTARG;;
+    m  ) MOUNT=$OPTARG;;
+    d  ) f_dump;;
+    D  ) DELETE=$OPTARG;f_delete;;
+    r  ) RESTORE=$OPTARG;f_restore;;
+    q  ) QUERY=$OPTARG;f_query;;
+    \? ) f_usage;;
+  esac 
+done

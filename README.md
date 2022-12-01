@@ -6,13 +6,13 @@
 pkg_add py3-tqdm awscli dateutils zstd
 ```
 ### Ubuntu
+You will have to download and compile LibreSSL
 ```
 apt install -y awscli dump python3-tqdm dateutils zstd
 ```
-You will have to download and compile LibreSSL
 
 ```
-usage: tardis [-c client] [-b bucket] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]
+usage: tardis -b bucket [-c client] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]
 options: -r (restore)
          -d (dump)
          -D (delete)

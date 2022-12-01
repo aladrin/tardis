@@ -11,6 +11,10 @@ f_usage() {
   echo "         -t tier Bulk (5-12 hours)"
 }
 
+f_error() {
+  echo "$SCRIPT: $1 missing argument"
+}
+
 f_check() {
   which $1 2>/dev/null || {
     echo $SCRIPT: $1 not found 1>&2
@@ -48,10 +52,6 @@ KEY=/etc/${SCRIPT}.d/${HOST}.key
 [ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }
 LOG_FILE=/var/log/$SCRIPT
 DGST=sha256
-
-f_error() {
-  echo "$SCRIPT: $1 missing argument"
-}
 
 f_restore() {
   [ -z "$RESTORE" ] && { f_error -f; f_usage; exit 1; }

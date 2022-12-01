@@ -102,7 +102,7 @@ f_dump() {
   df $2 &>/dev/null && {
     DATE=$(date +%Y-%m-%d_%H:%M:%S)
     echo $(date): $@>>$LOG_FILE
-    BASE_FILE=${DATE}_${HOST}$(echo $2|sed 's/\//_/g')_$1
+    BASE_FILE=${DATE}_${CLIENT}$(echo $2|sed 's/\//_/g')_$1
     DATA_FILE=$BASE_FILE.zst.dat
     DGST_FILE=$BASE_FILE.$DGST
     LIST_FILE=${BASE_FILE}_list.zst.dat

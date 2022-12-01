@@ -1,4 +1,5 @@
-# Incremental backup to Amazon S3
+# Incremental direct backup to Amazon S3
+This backs up directly over the wire. No staging required.
 When run with the dump option, the following files will be transferred to Amazon S3:
 * File system dump: zstandard compression, chacha encryption, saved to deep archive
 * File listing of files in the dump, not encrypted

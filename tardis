@@ -1,6 +1,13 @@
 #!/bin/bash
 SCRIPT=${0##*/}
 
+RUNFILE=/var/run/$SCRIPT
+[ -f $RUNFILE ] && { echo ${SCRIPT}: already running; exit 1; } || {
+  echo $$ > $RUNFILE
+  touch -t 197001010000.00 $RUNFILE
+  trap "rm $RUNFILE" EXIT
+}
+
 f_usage() {
   echo "usage: $SCRIPT -b bucket [-c client] [-k key] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]"
   echo "options: -r (restore)"
@@ -65,7 +72,7 @@ f_restore() {
   [ -z "$RESTORE" ] && { f_error -f; f_usage; exit 1; }
   [ -z "$MOUNT" ] && { f_error -m; f_usage; exit 1; }
   [ -z "$TIER" ] && TIER=Bulk
-  DATA_FILE=$CLIENT/$RESTORE
+  DATA_FILE=$RESTORE
   REQUEST=\'{\"Days\":1,\"GlacierJobParameters\":{\"Tier\":\"$TIER\"}}\'
   eval $AWS s3api restore-object \
     --bucket $BUCKET \
@@ -77,9 +84,9 @@ f_restore() {
     sleep $((60*60))
   done
   f_query|fgrep $DATA_FILE
-  TOTAL=$(aws s3 ls s3://$BUCKET/$DATA_FILE|awk '{print $3}')
+  TOTAL=$(aws s3 ls s3://$BUCKET/$CLIENT/$DATA_FILE|awk '{print $3}')
   cd $MOUNT
-  $AWS s3 cp $BUCKET/$DATA_FILE - | \
+  $AWS s3 cp s3://$BUCKET/$CLIENT/$DATA_FILE - | \
     $TQDM --bytes --total $TOTAL| \
     $OPENSSL enc $ENC -d -pass file:$KEY | \
     $ZSTD -d --stdout | \
@@ -120,12 +127,12 @@ f_dump() {
     TOTAL=$(find $MOUNT -xdev -newer $RUNFILE -ls | \
     tee >($ZSTD -22 --ultra --stdout | tee $LOCAL_LIST_FILE  | \
     $OPENSSL enc $ENC -e -pass file:$KEY | \
-    $AWS s3 cp - $BUCKET/$LIST_FILE) | \
+    $AWS s3 cp - s3://$BUCKET/$CLIENT/$LIST_FILE) | \
     awk '{sum+=$7}END{print sum}')
     [ -t 0 ] && echo DONE
     [ -n "$TOTAL" ] || {
       echo "${SCRIPT}: no change for $MOUNT (dump level $DUMP_LEVEL)"
-      $AWS s3 rm $BUCKET/$LIST_FILE >/dev/null
+      $AWS s3 rm s3://$BUCKET/$CLIENT/$LIST_FILE >/dev/null
       exit
     } && {
       [ -t 0 ] && TQDM="$TQDM --bytes --total $TOTAL" || TQDM=cat
@@ -135,8 +142,8 @@ f_dump() {
       $OPENSSL enc $ENC -e -pass file:$KEY | \
       tee >($OPENSSL dgst -$DGST | \
       awk -v d=$DGST -v o=$DATA_FILE '{gsub("stdin", o)} {gsub("^", toupper(d))} $1' | \
-      $AWS s3 cp - $BUCKET/$DGST_FILE) | \
-      $AWS s3 cp --storage-class DEEP_ARCHIVE --expected-size $TOTAL - $BUCKET/$DATA_FILE 2>>$LOG_FILE
+      $AWS s3 cp - s3://$BUCKET/$CLIENT/$DGST_FILE) | \
+      $AWS s3 cp --storage-class DEEP_ARCHIVE --expected-size $TOTAL - s3://$BUCKET/$CLIENT/$DATA_FILE 2>>$LOG_FILE
     }
   }
 }

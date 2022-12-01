@@ -1,11 +1,15 @@
 # Incremental backup to Amazon S3
 
 ## Dependancies
+### OpenBSD
+```
+pkg_add py3-tqdm awscli dateutils zstd
+```
 ### Ubuntu
 ```
-apt install -y dump python3-tqdm dateutils zstd
+apt install -y awscli dump python3-tqdm dateutils zstd
 ```
-* Please assume this broken for the time being.
+You will have to download and compile LibreSSL
 
 ```
 usage: tardis [-c client] [-b bucket] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]

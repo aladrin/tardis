@@ -41,12 +41,15 @@ f_depend() {
 f_check aws 1>/dev/null && AWS=$(f_check aws)
 f_check dump 1>/dev/null && DUMP=$(f_check dump)
 f_check openssl 1>/dev/null && OPENSSL=$(f_check openssl)
+OPENSSL_VERSION="$($OPENSSL version)"
+[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
 f_check tqdm 1>/dev/null && TQDM=$(f_check tqdm)
 f_check zstd 1>/dev/null && ZSTD=$(f_check zstd)
 OS=$(uname -s)
 if [ "$OS" = Linux ]; then
   export LD_LIBRARY_PATH=/usr/local/lib
-  ENC=-aes-256-cbc
+  #ENC=-aes-256-cbc
+  ENC=-chacha
   DUMPDATES=/var/lib/dumpdates
   f_check dateutils.dconv 1>/dev/null && DATECONV=$(f_check dateutils.dconv)
   f_check tac 1>/dev/null && TAC=$(f_check tac)
@@ -61,9 +64,6 @@ else
   echo Unsupported OS
   exit 1
 fi
-# better sort out some proper checking to ensure chacha is supported with the OpenSSL version
-#OPENSSL_VERSION="$($OPENSSL version)"
-#[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
 LOG_FILE=/var/log/$SCRIPT
 DGST=sha256
 

@@ -5,7 +5,7 @@
 ```
 apt install -y dump python3-tqdm dateutils zstd
 ```
-* Use at own risk. Please assume this broken for the time being.
+* Please assume this broken for the time being.
 
 ```
 usage: tardis [-c client] [-b bucket] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]

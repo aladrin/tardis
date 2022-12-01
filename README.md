@@ -1,7 +1,7 @@
 # Incremental backup to Amazon S3
 
-### Dependancies
-## Ubuntu
+## Dependancies
+### Ubuntu
 ```
 apt install -y dump python3-tqdm dateutils zstd
 ```

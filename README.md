@@ -4,7 +4,7 @@ When run with the dump option, the following files will be transferred to Amazon
 * File system dump: zstandard compression, chacha encryption, saved to deep archive
 * File listing of files in the dump, not encrypted
 * SHA256 of the dump file
-## Dependancies
+## Dependencies
 ### OpenBSD
 Works on ffs filesystem.
 ```

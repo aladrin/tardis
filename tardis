@@ -2,7 +2,7 @@
 SCRIPT=${0##*/}
 
 f_usage() {
-  echo "usage: $SCRIPT -b bucket [-c client] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]"
+  echo "usage: $SCRIPT -b bucket [-c client] [-k key] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]"
   echo "options: -r (restore)"
   echo "         -d (dump)"
   echo "         -D (delete)"
@@ -23,8 +23,12 @@ f_check() {
 }
 
 f_depend() {
-  [ -z "$BUCKET" ] && { f_error -b; f_usage; exit 1; }
+  mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
   [ -z "$CLIENT" ] && CLIENT=${HOSTNAME%%.*}
+  [ -z "$KEY" ] && KEY=/etc/${SCRIPT}.d/${CLIENT}.key
+  ### THE LOGIC IN THIS NEEDS SOME WORK
+  [ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }
+  [ -z "$BUCKET" ] && { f_error -b; f_usage; exit 1; }
 }
 
 f_check aws 1>/dev/null && AWS=$(f_check aws)
@@ -51,9 +55,6 @@ fi
 # better sort out some proper checking to ensure chacha is supported with the OpenSSL version
 #OPENSSL_VERSION="$($OPENSSL version)"
 #[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
-mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
-KEY=/etc/${SCRIPT}.d/${HOST}.key
-[ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }
 LOG_FILE=/var/log/$SCRIPT
 DGST=sha256
 

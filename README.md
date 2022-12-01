@@ -6,7 +6,7 @@
 pkg_add py3-tqdm awscli dateutils zstd
 ```
 ### Ubuntu
-I have no interest in adding OpenSSL support.
+I have no interest in adding OpenSSL support at this stage.
 You will have to download and compile LibreSSL https://www.libressl.org/
 ```
 apt install -y awscli dump python3-tqdm dateutils zstd

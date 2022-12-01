@@ -86,41 +86,43 @@ f_restore() {
 
 f_dump() {
   f_depend
-  mount|fgrep  -q " $2 " || { echo ${2}: not mounted; exit 1; }
+  [ -z "$MOUNT" ] && { f_error -m; f_usage; exit 1; }
+  [ -z "$DUMP_LEVEL" ] && { f_error -d; f_usage; exit 1; }
+  mount|fgrep  -q " $MOUNT " || { echo ${MOUNT}: not mounted; exit 1; }
   FORMAT='%a %b %d %T %Y'
   touch $DUMPDATES
   $TAC $DUMPDATES |
   while read -r LINE; do
     LINE=( $LINE )
     [ "${LINE[0]}" = $DEVICE ] && {
-      [ $1 -gt ${LINE[1]} ] && {
+      [ $DUMP_LEVEL -gt ${LINE[1]} ] && {
         touch -t $(echo ${LINE[@]}|awk '{print $3,$4,$5,$6,$7}'|$DATECONV -i "$FORMAT" -f "%Y%m%d%H%M.%S") $RUNFILE
         break
       }
     }
   done
-  df $2 &>/dev/null && {
+  df $MOUNT &>/dev/null && {
     DATE=$(date +%Y-%m-%d_%H:%M:%S)
     echo $(date): $@>>$LOG_FILE
-    BASE_FILE=${DATE}_${CLIENT}$(echo $2|sed 's/\//_/g')_$1
+    BASE_FILE=${DATE}_${CLIENT}$(echo $MOUNT|sed 's/\//_/g')_$DUMP_LEVEL
     DATA_FILE=$BASE_FILE.zst.dat
     DGST_FILE=$BASE_FILE.$DGST
     LIST_FILE=${BASE_FILE}_list.zst.dat
     LOCAL_LIST_FILE=/var/db/$SCRIPT/${BASE_FILE}_list.zst
-    [ -t 0 ] && echo -n "Reading inodes on $2 (dump level $1): "
-    TOTAL=$(find $2 -xdev -newer $RUNFILE -ls | \
+    [ -t 0 ] && echo -n "Reading inodes on $MOUNT (dump level $DUMP_LEVEL): "
+    TOTAL=$(find $MOUNT -xdev -newer $RUNFILE -ls | \
     tee >($ZSTD -22 --ultra --stdout | tee $LOCAL_LIST_FILE  | \
     $OPENSSL enc -chacha -e -pass file:$KEY | \
     $AWS s3 cp - $BUCKET/$LIST_FILE) | \
     awk '{sum+=$7}END{print sum}')
     [ -t 0 ] && echo DONE
     [ -n "$TOTAL" ] || {
-      echo "${SCRIPT}: no change for $2 (dump level $1)"
+      echo "${SCRIPT}: no change for $MOUNT (dump level $DUMP_LEVEL)"
       $AWS s3 rm $BUCKET/$LIST_FILE >/dev/null
       exit
     } && {
       [ -t 0 ] && TQDM="$TQDM --bytes --total $TOTAL" || TQDM=cat
-      $DUMP -$1 -u -f - $2 2>/dev/null | \
+      $DUMP -$1 -u -f - $MOUNT 2>/dev/null | \
       $TQDM | \
       $ZSTD --long --stdout | \
       $OPENSSL enc -chacha -e -pass file:$KEY | \
@@ -155,7 +157,7 @@ while getopts "D:b:c:q:r:t:m:d:h" OPT; do
     c  ) CLIENT=$OPTARG;;
     t  ) TIER=$OPTARG;;
     m  ) MOUNT=$OPTARG;;
-    d  ) f_dump;;
+    d  ) DUMP_LEVEL=$OPTARG;f_dump;;
     D  ) DELETE=$OPTARG;f_delete;;
     r  ) RESTORE=$OPTARG;f_restore;;
     q  ) QUERY=$OPTARG;f_query;;

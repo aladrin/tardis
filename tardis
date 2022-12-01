@@ -2,7 +2,7 @@
 SCRIPT=${0##*/}
 
 f_usage() {
-  echo "usage: $SCRIPT [-c client] [-b bucket] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]"
+  echo "usage: $SCRIPT -b bucket [-c client] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]"
   echo "options: -r (restore)"
   echo "         -d (dump)"
   echo "         -D (delete)"
@@ -18,6 +18,8 @@ f_check() {
   }
 }
 
+[ -z "$BUCKET" ] && { f_error -b; f_usage; exit 1; }
+[ -z "$CLIENT" ] && CLIENT=${HOSTNAME%%.*}
 f_check aws 1>/dev/null && AWS=$(f_check aws)
 f_check dump 1>/dev/null && DUMP=$(f_check dump)
 f_check openssl 1>/dev/null && OPENSSL=$(f_check openssl)
@@ -51,19 +53,10 @@ f_error() {
   echo "$SCRIPT: $1 missing argument"
 }
 
-f_env() {
-  [ -z "$AWS_ACCESS_KEY_ID" ]
-  [ -z "$AWS_SECRET_ACCESS_KEY" ]
-  [ -z "$AWS_DEFAULT_REGION" ]
-  [ -z "$CLIENT" ] && CLIENT=${HOSTNAME%%.*}
-  [ -z "$BUCKET" ]
-}
-
 f_restore() {
   [ -z "$RESTORE" ] && { f_error -f; f_usage; exit 1; }
   [ -z "$MOUNT" ] && { f_error -m; f_usage; exit 1; }
   [ -z "$TIER" ] && TIER=Bulk
-  f_env
   DATA_FILE=$CLIENT/$RESTORE
   REQUEST=\'{\"Days\":1,\"GlacierJobParameters\":{\"Tier\":\"$TIER\"}}\'
   eval $AWS s3api restore-object \

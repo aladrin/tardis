@@ -158,6 +158,7 @@ f_query() {
 }
 
 f_delete() {
+  f_depend
   [ -z "$DELETE" ] && { f_error -f; f_usage; exit 1; }
   $AWS s3 rm s3://$BUCKET/$CLIENT/$DELETE
 }

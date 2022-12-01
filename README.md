@@ -13,7 +13,7 @@ apt install -y awscli dump python3-tqdm dateutils zstd
 ```
 
 ```
-usage: tardis -b bucket [-c client] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]
+usage: tardis -b bucket [-c client] [-k key] [-m mount [-d level|-r file [-t Standard|Bulk]]] [-q ALL|STANDARD|DEEP_ARCHIVE]
 options: -r (restore)
          -d (dump)
          -D (delete)

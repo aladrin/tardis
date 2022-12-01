@@ -1,6 +1,6 @@
 # Incremental backup to Amazon S3
 When run with the dump option, the following files will be transferred to Amazon S3:
-* File system dump, zstandard compression, chacha encryption, deep archive
+* File system dump: zstandard compression, chacha encryption, saved to deep archive
 * File listing of files in the dump, not encrypted
 * SHA256 of the dump file
 ## Dependancies

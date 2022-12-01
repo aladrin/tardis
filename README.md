@@ -1,5 +1,8 @@
 # Incremental backup to Amazon S3
-
+When run with the dump option, the following files will be transferred to the specified S3 bucket:
+* File system dump, zstandard compression and chacha encryption
+* File listing of files in the dump
+* SHA256 of the dump file
 ## Dependancies
 ### OpenBSD
 Works on ffs filesystem.

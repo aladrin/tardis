@@ -33,7 +33,9 @@ f_depend() {
   mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
   [ -z "$CLIENT" ] && CLIENT=${HOSTNAME%%.*}
   [ -z "$KEY" ] && KEY=/etc/${SCRIPT}.d/${CLIENT}.key
-  ### THE LOGIC IN THIS NEEDS SOME WORK
+  ##############################################
+  ### NEED TO DO SOME WORK ON KEY MANAGEMENT ###
+  ##############################################
   [ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }
   [ -z "$BUCKET" ] && { f_error -b; f_usage; exit 1; }
 }

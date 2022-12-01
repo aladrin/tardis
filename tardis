@@ -39,11 +39,13 @@ f_check zstd 1>/dev/null && ZSTD=$(f_check zstd)
 OS=$(uname -s)
 if [ "$OS" = Linux ]; then
   export LD_LIBRARY_PATH=/usr/local/lib
+  ENC=-chacha20
   DUMPDATES=/var/lib/dumpdates
   f_check dateutils.dconv 1>/dev/null && DATECONV=$(f_check dateutils.dconv)
   f_check tac 1>/dev/null && TAC=$(f_check tac)
   DEVICE=$(mount|fgrep " $2 "|awk '{print $1}')
 elif [ "$OS" = OpenBSD ]; then
+  ENC=-chacha
   DUMPDATES=/etc/dumpdates
   f_check dateconv 1>/dev/null && DATECONV=$(f_check dateconv)
   f_check gtac 1>/dev/null && TAC=$(f_check gtac)
@@ -79,7 +81,7 @@ f_restore() {
   cd $MOUNT
   $AWS s3 cp $BUCKET/$DATA_FILE - | \
     $TQDM --bytes --total $TOTAL| \
-    $OPENSSL enc -chacha -d -pass file:$KEY | \
+    $OPENSSL enc $ENC -d -pass file:$KEY | \
     $ZSTD -d --stdout | \
     restore -f - -r $MOUNT 2>/dev/null
 }
@@ -88,6 +90,11 @@ f_dump() {
   f_depend
   [ -z "$MOUNT" ] && { f_error -m; f_usage; exit 1; }
   [ -z "$DUMP_LEVEL" ] && { f_error -d; f_usage; exit 1; }
+  if [ "$OS" = Linux ]; then
+    DEVICE=$(mount|fgrep " $MOUNT "|awk '{print $1}')
+  elif [ "$OS" = OpenBSD ]; then
+    DEVICE=$(mount -v|fgrep " $MOUNT "|awk '{print $2}'|sed -e 's/(//' -e 's/)//')
+  fi
   mount|fgrep  -q " $MOUNT " || { echo ${MOUNT}: not mounted; exit 1; }
   FORMAT='%a %b %d %T %Y'
   touch $DUMPDATES
@@ -112,7 +119,7 @@ f_dump() {
     [ -t 0 ] && echo -n "Reading inodes on $MOUNT (dump level $DUMP_LEVEL): "
     TOTAL=$(find $MOUNT -xdev -newer $RUNFILE -ls | \
     tee >($ZSTD -22 --ultra --stdout | tee $LOCAL_LIST_FILE  | \
-    $OPENSSL enc -chacha -e -pass file:$KEY | \
+    $OPENSSL enc $ENC -e -pass file:$KEY | \
     $AWS s3 cp - $BUCKET/$LIST_FILE) | \
     awk '{sum+=$7}END{print sum}')
     [ -t 0 ] && echo DONE
@@ -125,7 +132,7 @@ f_dump() {
       $DUMP -$1 -u -f - $MOUNT 2>/dev/null | \
       $TQDM | \
       $ZSTD --long --stdout | \
-      $OPENSSL enc -chacha -e -pass file:$KEY | \
+      $OPENSSL enc $ENC -e -pass file:$KEY | \
       tee >($OPENSSL dgst -$DGST | \
       awk -v d=$DGST -v o=$DATA_FILE '{gsub("stdin", o)} {gsub("^", toupper(d))} $1' | \
       $AWS s3 cp - $BUCKET/$DGST_FILE) | \

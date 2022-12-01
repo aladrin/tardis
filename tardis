@@ -127,25 +127,23 @@ f_dump() {
 
 f_query() {
   [ $QUERY = ALL ] && QUERY="STANDARD DEEP_ARCHIVE"
-  f_env
   for QRY in $QUERY; do
     Q=\"Contents[?StorageClass==\'$QRY\']\"
-    eval aws s3api list-objects-v2 --bucket $BUCKET --query $Q | fgrep $CLIENT
+    eval $AWS s3api list-objects-v2 --bucket $BUCKET --query $Q | fgrep $CLIENT
   done
 }
 
 f_delete() {
   [ -z "$DELETE" ] && { f_error -f; f_usage; exit 1; }
-  f_env
-  aws s3 rm s3://$BUCKET/$CLIENT/$DELETE
+  $AWS s3 rm s3://$BUCKET/$CLIENT/$DELETE
 }
 
 [ $# = 0 ] && { f_usage; exit 1; }
 
-while getopts "D:c:b:q:r:t:m:d:h" OPT; do
+while getopts "D:b:c:q:r:t:m:d:h" OPT; do
    case $OPT in
     h  ) f_usage;;
-    c  ) CLIENT=$OPTARG;;
+    b  ) BUCKET=$OPTARG;;
     b  ) BUCKET=$OPTARG;;
     t  ) TIER=$OPTARG;;
     m  ) MOUNT=$OPTARG;;

@@ -167,11 +167,12 @@ f_delete() {
 
 [ $# = 0 ] && { f_usage; exit 1; }
 
-while getopts "D:b:c:q:r:t:m:d:h" OPT; do
+while getopts "D:b:c:k:q:r:t:m:d:h" OPT; do
    case $OPT in
     h  ) f_usage;;
     b  ) BUCKET=$OPTARG;;
     c  ) CLIENT=$OPTARG;;
+    k  ) KEY=$OPTARG;;
     t  ) TIER=$OPTARG;;
     m  ) MOUNT=$OPTARG;;
     d  ) DUMP_LEVEL=$OPTARG;f_dump;;

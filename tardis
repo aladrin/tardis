@@ -39,8 +39,8 @@ else
   echo Unsupported OS
   exit 1
 fi
-OPENSSL_VERSION="$($OPENSSL version)"
-[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
+#OPENSSL_VERSION="$($OPENSSL version)"
+#[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
 mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
 KEY=/etc/${SCRIPT}.d/${HOST}.key
 [ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }

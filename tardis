@@ -22,8 +22,11 @@ f_check() {
   }
 }
 
-[ -z "$BUCKET" ] && { f_error -b; f_usage; exit 1; }
-[ -z "$CLIENT" ] && CLIENT=${HOSTNAME%%.*}
+f_depend() {
+  [ -z "$BUCKET" ] && { f_error -b; f_usage; exit 1; }
+  [ -z "$CLIENT" ] && CLIENT=${HOSTNAME%%.*}
+}
+
 f_check aws 1>/dev/null && AWS=$(f_check aws)
 f_check dump 1>/dev/null && DUMP=$(f_check dump)
 f_check openssl 1>/dev/null && OPENSSL=$(f_check openssl)
@@ -45,6 +48,7 @@ else
   echo Unsupported OS
   exit 1
 fi
+# better sort out some proper checking to ensure chacha is supported with the OpenSSL version
 #OPENSSL_VERSION="$($OPENSSL version)"
 #[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
 mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
@@ -54,6 +58,7 @@ LOG_FILE=/var/log/$SCRIPT
 DGST=sha256
 
 f_restore() {
+  f_depend
   [ -z "$RESTORE" ] && { f_error -f; f_usage; exit 1; }
   [ -z "$MOUNT" ] && { f_error -m; f_usage; exit 1; }
   [ -z "$TIER" ] && TIER=Bulk
@@ -79,6 +84,7 @@ f_restore() {
 }
 
 f_dump() {
+  f_depend
   mount|fgrep  -q " $2 " || { echo ${2}: not mounted; exit 1; }
   FORMAT='%a %b %d %T %Y'
   touch $DUMPDATES
@@ -126,6 +132,7 @@ f_dump() {
 }
 
 f_query() {
+  f_depend
   [ $QUERY = ALL ] && QUERY="STANDARD DEEP_ARCHIVE"
   for QRY in $QUERY; do
     Q=\"Contents[?StorageClass==\'$QRY\']\"
@@ -144,7 +151,7 @@ while getopts "D:b:c:q:r:t:m:d:h" OPT; do
    case $OPT in
     h  ) f_usage;;
     b  ) BUCKET=$OPTARG;;
-    b  ) BUCKET=$OPTARG;;
+    c  ) CLIENT=$OPTARG;;
     t  ) TIER=$OPTARG;;
     m  ) MOUNT=$OPTARG;;
     d  ) f_dump;;

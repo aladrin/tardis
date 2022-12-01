@@ -11,15 +11,44 @@ f_usage() {
   echo "         -t tier Bulk (5-12 hours)"
 }
 
-f_error() {
-  echo "$SCRIPT: $1 missing argument"
-}
-
 f_check() {
   which $1 2>/dev/null || {
     echo $SCRIPT: $1 not found 1>&2
     exit 1
   }
+}
+
+f_check aws 1>/dev/null && AWS=$(f_check aws)
+f_check dump 1>/dev/null && DUMP=$(f_check dump)
+f_check openssl 1>/dev/null && OPENSSL=$(f_check openssl)
+f_check tqdm 1>/dev/null && TQDM=$(f_check tqdm)
+f_check zstd 1>/dev/null && ZSTD=$(f_check zstd)
+OS=$(uname -s)
+if [ "$OS" = Linux ]; then
+  export LD_LIBRARY_PATH=/usr/local/lib
+  DUMPDATES=/var/lib/dumpdates
+  f_check dateutils.dconv 1>/dev/null && DATECONV=$(f_check dateutils.dconv)
+  f_check tac 1>/dev/null && TAC=$(f_check tac)
+  DEVICE=$(mount|fgrep " $2 "|awk '{print $1}')
+elif [ "$OS" = OpenBSD ]; then
+  DUMPDATES=/etc/dumpdates
+  f_check dateconv 1>/dev/null && DATECONV=$(f_check dateconv)
+  f_check gtac 1>/dev/null && TAC=$(f_check gtac)
+  DEVICE=$(mount -v|fgrep " $2 "|awk '{print $2}'|sed -e 's/(//' -e 's/)//')
+else
+  echo Unsupported OS
+  exit 1
+fi
+OPENSSL_VERSION="$($OPENSSL version)"
+[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
+mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
+KEY=/etc/${SCRIPT}.d/${HOST}.key
+[ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }
+LOG_FILE=/var/log/$SCRIPT
+DGST=sha256
+
+f_error() {
+  echo "$SCRIPT: $1 missing argument"
 }
 
 f_env() {
@@ -37,7 +66,7 @@ f_restore() {
   f_env
   DATA_FILE=$CLIENT/$RESTORE
   REQUEST=\'{\"Days\":1,\"GlacierJobParameters\":{\"Tier\":\"$TIER\"}}\'
-  eval aws s3api restore-object \
+  eval $AWS s3api restore-object \
     --bucket $BUCKET \
     --key $DATA_FILE \
     --restore-request $REQUEST
@@ -47,35 +76,17 @@ f_restore() {
     sleep $((60*60))
   done
   f_query|fgrep $DATA_FILE
-  KEY=/etc/s3dump.d/${HOST}.key
   TOTAL=$(aws s3 ls s3://$BUCKET/$DATA_FILE|awk '{print $3}')
   cd $MOUNT
-  aws s3 cp $BUCKET/$DATA_FILE - | \
-    tqdm --bytes --total $TOTAL| \
-    openssl enc -chacha -d -pass file:$KEY | \
-    zstd -d --stdout | \
+  $AWS s3 cp $BUCKET/$DATA_FILE - | \
+    $TQDM --bytes --total $TOTAL| \
+    $OPENSSL enc -chacha -d -pass file:$KEY | \
+    $ZSTD -d --stdout | \
     restore -f - -r $MOUNT 2>/dev/null
 }
 
 f_dump() {
-  OPENSSL=$(f_check openssl)
-  OS=$(uname -s)
   mount|fgrep  -q " $2 " || { echo ${2}: not mounted; exit 1; }
-  if [ "$OS" = Linux ]; then
-    export LD_LIBRARY_PATH=/usr/local/lib
-    DUMPDATES=/var/lib/dumpdates
-    f_check dateutils.dconv 1>/dev/null && DATECONV=$(f_check dateutils.dconv)
-    f_check tac 1>/dev/null && TAC=$(f_check tac)
-    DEVICE=$(mount|fgrep " $2 "|awk '{print $1}')
-  elif [ "$OS" = OpenBSD ]; then
-    DUMPDATES=/etc/dumpdates
-    f_check dateconv 1>/dev/null && DATECONV=$(f_check dateconv)
-    f_check gtac 1>/dev/null && TAC=$(f_check gtac)
-    DEVICE=$(mount -v|fgrep " $2 "|awk '{print $2}'|sed -e 's/(//' -e 's/)//')
-  else
-    echo Unsupported OS
-    exit 1
-  fi
   FORMAT='%a %b %d %T %Y'
   touch $DUMPDATES
   $TAC $DUMPDATES |
@@ -88,17 +99,6 @@ f_dump() {
       }
     }
   done
-  OPENSSL_VERSION="$($OPENSSL version)"
-  [ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
-  mkdir -p /etc/${SCRIPT}.d /var/db/$SCRIPT
-  KEY=/etc/${SCRIPT}.d/${HOST}.key
-  [ -f $KEY ] || { dd if=/dev/urandom bs=1 count=8192 of=$KEY; chmod 400 $KEY; }
-  LOG_FILE=/var/log/$SCRIPT
-  DGST=sha256
-  f_check aws 1>/dev/null && AWS=$(f_check aws)
-  f_check dump 1>/dev/null && DUMP=$(f_check dump)
-  f_check tqdm 1>/dev/null && TQDM=$(f_check tqdm)
-  f_check zstd 1>/dev/null && ZSTD=$(f_check zstd)
   df $2 &>/dev/null && {
     DATE=$(date +%Y-%m-%d_%H:%M:%S)
     echo $(date): $@>>$LOG_FILE

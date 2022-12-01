@@ -129,7 +129,7 @@ f_dump() {
       exit
     } && {
       [ -t 0 ] && TQDM="$TQDM --bytes --total $TOTAL" || TQDM=cat
-      $DUMP -$1 -u -f - $MOUNT 2>/dev/null | \
+      $DUMP -$DUMP_LEVEL -u -f - $MOUNT 2>/dev/null | \
       $TQDM | \
       $ZSTD --long --stdout | \
       $OPENSSL enc $ENC -e -pass file:$KEY | \

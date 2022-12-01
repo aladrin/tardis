@@ -1,4 +1,4 @@
-Incremental backup to Amazon S3
+# Incremental backup to Amazon S3
 
 * The incremental backup uses dump.
 ```

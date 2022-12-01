@@ -2,10 +2,12 @@
 
 ## Dependancies
 ### OpenBSD
+Works on ffs filesystem.
 ```
 pkg_add py3-tqdm awscli dateutils zstd
 ```
 ### Ubuntu
+Works on ext2, ext3, ext4 and btrfs filesystems.
 I have no interest in adding OpenSSL support at this stage.
 You will have to download and compile LibreSSL https://www.libressl.org/
 ```

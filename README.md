@@ -9,13 +9,32 @@ When run with the dump option, the following files will be transferred to Amazon
 Works on ffs filesystem.
 ```
 pkg_add py3-tqdm awscli dateutils zstd
+git clone https://github.com/aladrin/tardis.git
+mv tardis/tardis /usr/local/bin
 ```
-### Ubuntu
+### Linux
 Works on ext2, ext3, ext4 and btrfs filesystems.
-I have no interest in adding OpenSSL support at this stage.
+#### Docker
+```
+docker pull aladrin/tardis
+docker run --name tardis -i -t aladrin/tardis
+```
+#### Ubuntu
 You will have to download and compile LibreSSL https://www.libressl.org/
 ```
-apt install -y awscli dump python3-tqdm dateutils zstd
+apt install -y awscli dump python3-tqdm dateutils zstd git gcc curl make
+git clone https://github.com/aladrin/tardis.git
+mv tardis/tardis /usr/local/bin
+rm -rf tardis
+curl https://cloudflare.cdn.openbsd.org/pub/OpenBSD/LibreSSL/libressl-$(curl -s https://www.libressl.org/ |fgrep relnotes.txt|awk -F'relnotes.txt">' '{print $2}'|awk -F'<' '{print $1}'|awk '{print $NF}').tar.gz -O
+tar xzvf libressl-*.tar.gz
+rm libressl*.tar.gz
+cd libressl*
+./configure
+make install
+cd ..
+rm -rf libressl*
+
 ```
 
 ```

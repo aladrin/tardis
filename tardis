@@ -43,8 +43,6 @@ f_depend() {
 f_check aws 1>/dev/null && AWS=$(f_check aws)
 f_check dump 1>/dev/null && DUMP=$(f_check dump)
 f_check openssl 1>/dev/null && OPENSSL=$(f_check openssl)
-OPENSSL_VERSION="$($OPENSSL version)"
-[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
 f_check tqdm 1>/dev/null && TQDM=$(f_check tqdm)
 f_check zstd 1>/dev/null && ZSTD=$(f_check zstd)
 OS=$(uname -s)
@@ -66,6 +64,8 @@ else
   echo Unsupported OS
   exit 1
 fi
+OPENSSL_VERSION="$($OPENSSL version)"
+[ ${OPENSSL_VERSION%% *} = LibreSSL ] || { echo $SCRIPT: LibreSSL not found; exit 1; }
 LOG_FILE=/var/log/$SCRIPT
 DGST=sha256
 

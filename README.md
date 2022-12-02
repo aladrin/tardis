@@ -8,7 +8,7 @@ When run with the dump option, the following files will be transferred to Amazon
 ### OpenBSD
 Works on ffs filesystem.
 ```
-pkg_add py3-tqdm awscli dateutils zstd
+pkg_add py3-tqdm awscli dateutils zstd git
 git clone https://github.com/aladrin/tardis.git
 mv tardis/tardis /usr/local/bin
 ```

@@ -27,7 +27,7 @@ Tardis compiles to a standalone static binary (`CGO_ENABLED=0`) and requires **n
 
 ```sh
 pkg_add go git
-git clone [https://github.com/aladrin/tardis.git](https://github.com/aladrin/tardis.git)
+git clone https://github.com/aladrin/tardis.git
 cd tardis
 sh ./build.sh
 ```

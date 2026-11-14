@@ -54,7 +54,7 @@ sudo apk add openssl dump xfsdump
 `build.sh` automatically detects your host `GOOS` (`openbsd` or `linux`) and `GOARCH`, compiling a static `CGO_ENABLED=0` binary:
 
 ```sh
-git clone [https://github.com/aladrin/kerr.git](https://github.com/aladrin/kerr.git)
+git clone https://github.com/aladrin/kerr.git
 cd kerr
 sh ./build.sh
 ```

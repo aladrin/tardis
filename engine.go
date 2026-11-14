@@ -1,4 +1,4 @@
-//go:build openbsd
+//go:build openbsd || linux
 
 package main
 
@@ -41,6 +41,15 @@ const (
 
 	MaxCatalogBytes = 256 * 1024 * 1024
 )
+
+// DumpPipeline encapsulates OS- and filesystem-specific dump and TOC subprocesses.
+type DumpPipeline struct {
+	DriverName      string
+	DumpCmd         *exec.Cmd
+	TocCmd          *exec.Cmd
+	ParseTOC        func(r io.Reader, mountPoint string, countAtomic *atomic.Int64) ([]CatalogEntry, error)
+	RecordDumpDates bool
+}
 
 // FormatBytes formats a byte count into human-readable IEC units.
 func FormatBytes(b int64) string {
@@ -328,7 +337,7 @@ func (t *CatalogTree) MarkedSummary() (int, int64) {
 	return count, bytesSum
 }
 
-// EffectiveRestorePaths collapses fully-marked subtrees into minimal relative paths for `/sbin/restore -x`.
+// EffectiveRestorePaths collapses fully-marked subtrees into minimal relative paths for selective extraction.
 // Returns an empty slice paired with fullRestore=true if the root node itself is fully marked.
 func (t *CatalogTree) EffectiveRestorePaths() (paths []string, fullRestore bool) {
 	if t == nil || t.Root == nil {
@@ -407,9 +416,8 @@ func (t *CatalogTree) Flatten(filter string) []*CatalogNode {
 	return out
 }
 
-// SnapshotChainForTarget computes the chronological BSD dump level chain (L0 -> ... -> target) for a snapshot.
+// SnapshotChainForTarget computes the chronological dump level chain (L0 -> ... -> target) for a snapshot.
 func SnapshotChainForTarget(allMountSnapshots []SnapshotRecord, target SnapshotRecord) []SnapshotRecord {
-	// Collect snapshots for the same mount at or before target.Meta.Timestamp, sorted oldest-first.
 	var candidates []SnapshotRecord
 	for _, s := range allMountSnapshots {
 		if s.Meta.MountSlug == target.Meta.MountSlug && !s.Meta.Timestamp.After(target.Meta.Timestamp) {
@@ -420,7 +428,6 @@ func SnapshotChainForTarget(allMountSnapshots []SnapshotRecord, target SnapshotR
 		return candidates[i].Meta.Timestamp.Before(candidates[j].Meta.Timestamp)
 	})
 
-	// Walk backward from target requiring strictly decreasing dump levels down to 0.
 	var revChain []SnapshotRecord
 	needMaxLevel := target.Meta.Level + 1
 	for i := len(candidates) - 1; i >= 0; i-- {
@@ -500,7 +507,7 @@ func (j RestoreJob) IsTerminal() bool {
 	return j.Status == JobCompleted || j.Status == JobFailed
 }
 
-// Engine coordinates configuration, LibreSSL cryptography, S3 catalogs, dumps, and staged restores.
+// Engine coordinates configuration, SSL cryptography, S3 catalogs, dumps, and staged restores.
 type Engine struct {
 	cfgMu      sync.RWMutex
 	cfg        *Config
@@ -587,7 +594,12 @@ func (e *Engine) NewStore(ctx context.Context) (*S3Store, error) {
 	return NewS3Store(ctx, cfg)
 }
 
-// EnsureKeyForClient loads or atomically creates the 0400 LibreSSL/HMAC keyfile for client.
+// ResolveSSL resolves and validates the active OS SSL runtime (LibreSSL on OpenBSD; LibreSSL or OpenSSL on Linux).
+func (e *Engine) ResolveSSL() (*SSLRuntime, error) {
+	return ResolveSSLRuntime(e.ConfigSnapshot())
+}
+
+// EnsureKeyForClient loads or atomically creates the 0400 master keyfile for client.
 func (e *Engine) EnsureKeyForClient(client string, createIfMissing bool) (*KeyMaterial, error) {
 	cfg := e.ConfigSnapshot()
 	keyPath := cfg.EffectiveKeyPath()
@@ -631,8 +643,9 @@ func parseStatToCatalogEntry(mntPath, relPath, fallbackType string, fallbackIno 
 		}
 	}
 
+	rawMode := uint32(st.Mode)
 	var fType string
-	switch st.Mode & unix.S_IFMT {
+	switch rawMode & unix.S_IFMT {
 	case unix.S_IFDIR:
 		fType = "d"
 	case unix.S_IFLNK:
@@ -657,12 +670,12 @@ func parseStatToCatalogEntry(mntPath, relPath, fallbackType string, fallbackIno 
 	}
 
 	return CatalogEntry{
-		Inode:      st.Ino,
+		Inode:      uint64(st.Ino),
 		Type:       fType,
-		Mode:       st.Mode & 07777,
-		UID:        st.Uid,
-		GID:        st.Gid,
-		Size:       st.Size,
+		Mode:       rawMode & 07777,
+		UID:        uint32(st.Uid),
+		GID:        uint32(st.Gid),
+		Size:       int64(st.Size),
 		Mtime:      int64(st.Mtim.Sec),
 		LinkTarget: linkTarget,
 		Path:       relPath,
@@ -812,9 +825,9 @@ func writeAtomic0600(path string, data []byte) error {
 	return nil
 }
 
-// RunDump executes a full or incremental OpenBSD `/sbin/dump`, builds an exact S3 Standard catalog,
-// encrypts with LibreSSL ChaCha20+PBKDF2, signs with domain-bound HMAC-SHA256, and streams to S3 DEEP_ARCHIVE.
-// Returns (meta, changed=false, nil) if an incremental dump detected zero modified inodes.
+// RunDump executes a full or incremental filesystem dump (OpenBSD FFS dump, Linux ext2/3/4 dump, or Linux XFS xfsdump),
+// builds an exact S3 Standard catalog, encrypts via ChaCha20+PBKDF2, signs with domain-bound HMAC-SHA256,
+// and streams to S3 DEEP_ARCHIVE. Returns (meta, changed=false, nil) if incremental scan found zero modified inodes.
 func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onProgress func(DumpProgress)) (*ArchiveMeta, bool, error) {
 	if level < 0 || level > 9 {
 		return nil, false, fmt.Errorf("invalid dump level %d (must be 0..9)", level)
@@ -826,7 +839,8 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 	if err := EnsureDirs(cfg); err != nil {
 		return nil, false, err
 	}
-	if _, err := VerifyLibreSSL(); err != nil {
+	sslRT, err := ResolveSSLRuntime(cfg)
+	if err != nil {
 		return nil, false, err
 	}
 
@@ -840,8 +854,8 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 	if err != nil {
 		return nil, false, err
 	}
-	if mnt.FSType != "ffs" {
-		return nil, false, fmt.Errorf("%s is %s (OpenBSD /sbin/dump requires ffs)", mnt.MountPoint, mnt.FSType)
+	if err := ValidateDumpMount(mnt); err != nil {
+		return nil, false, err
 	}
 
 	km, err := e.EnsureKeyForClient(cfg.EffectiveClient(), true)
@@ -855,7 +869,8 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		return nil, false, err
 	}
 
-	refTime, hasRef, err := ReferenceDumpTime(mnt, level)
+	dumpDatesPath := cfg.EffectiveDumpDatesPath()
+	refTime, hasRef, err := ReferenceDumpTime(dumpDatesPath, mnt, level)
 	if err != nil {
 		return nil, false, err
 	}
@@ -869,45 +884,46 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		return nil, false, err
 	}
 	if !fullDump && !changed {
-		Logf(cfg, "dump skipped (no changes): mount=%s level=%d since=%s", mnt.MountPoint, level, refTime.Format(time.RFC3339))
+		Logf(cfg, "dump skipped (no changes): mount=%s fs=%s level=%d since=%s",
+			mnt.MountPoint, mnt.FSType, level, refTime.Format(time.RFC3339))
 		return nil, false, nil
 	}
 
-	now := time.Now()
+	dumpStartTime := time.Now()
 	client := cfg.EffectiveClient()
-	meta := FormatArchiveBase(now, client, mnt.MountPoint, level)
-	Logf(cfg, "starting dump: archive=%s mount=%s level=%d est_bytes=%d", meta.BaseName, mnt.MountPoint, level, estBytes)
+	meta := FormatArchiveBase(dumpStartTime, client, mnt.MountPoint, level)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// 1. Start OpenBSD `/sbin/dump -<level>au -f - <mount>`
-	dumpCmd := exec.CommandContext(runCtx, DumpBin, fmt.Sprintf("-%da", level), "-u", "-f", "-", mnt.MountPoint)
-	dumpCmd.SysProcAttr = &unix.SysProcAttr{Setsid: true}
+	pipe, err := BuildDumpPipeline(runCtx, cfg, mnt, meta, level)
+	if err != nil {
+		return nil, true, err
+	}
+
+	Logf(cfg, "starting dump (%s): archive=%s mount=%s level=%d ssl=%q est_bytes=%d",
+		pipe.DriverName, meta.BaseName, mnt.MountPoint, level, sslRT.Summary(), estBytes)
+
 	var dumpStderr bytes.Buffer
-	dumpCmd.Stderr = &dumpStderr
-	dumpStdout, err := dumpCmd.StdoutPipe()
+	pipe.DumpCmd.Stderr = &dumpStderr
+	dumpStdout, err := pipe.DumpCmd.StdoutPipe()
 	if err != nil {
 		return nil, true, fmt.Errorf("attach dump stdout: %w", err)
 	}
 
-	// 2. Start `/sbin/restore -t -v -f -` to harvest the exact tape directory/inode table
 	catPipeR, catPipeW := io.Pipe()
-	restoreTVCmd := exec.CommandContext(runCtx, RestoreBin, "-t", "-v", "-f", "-")
-	restoreTVCmd.SysProcAttr = &unix.SysProcAttr{Setsid: true}
-	restoreTVCmd.Stdin = catPipeR
-	var restoreTVStderr bytes.Buffer
-	restoreTVCmd.Stderr = &restoreTVStderr
-	restoreTVStdout, err := restoreTVCmd.StdoutPipe()
+	pipe.TocCmd.Stdin = catPipeR
+	var tocStderr bytes.Buffer
+	pipe.TocCmd.Stderr = &tocStderr
+	tocStdout, err := pipe.TocCmd.StdoutPipe()
 	if err != nil {
 		_ = catPipeR.Close()
 		_ = catPipeW.Close()
-		return nil, true, fmt.Errorf("attach restore -tv stdout: %w", err)
+		return nil, true, fmt.Errorf("attach TOC stdout: %w", err)
 	}
 
-	// 3. Connect pure-Go zstd (--long 8MiB window) -> LibreSSL EncryptStream -> S3 DEEP_ARCHIVE
 	encPlainR, encPlainW := io.Pipe()
-	encStream, err := NewEncryptStream(runCtx, km, meta.DataKey, encPlainR)
+	encStream, err := NewEncryptStream(runCtx, sslRT, km, meta.DataKey, encPlainR)
 	if err != nil {
 		_ = catPipeR.Close()
 		_ = catPipeW.Close()
@@ -917,19 +933,21 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 	}
 	defer encStream.Close()
 
-	if err := dumpCmd.Start(); err != nil {
+	if err := pipe.DumpCmd.Start(); err != nil {
 		_ = catPipeR.Close()
 		_ = catPipeW.Close()
 		_ = encPlainW.Close()
-		return nil, true, fmt.Errorf("start %s: %w", DumpBin, err)
+		return nil, true, fmt.Errorf("start %s (%s): %w", pipe.DriverName, pipe.DumpCmd.Path, err)
 	}
-	if err := restoreTVCmd.Start(); err != nil {
+	if err := pipe.TocCmd.Start(); err != nil {
 		_ = catPipeR.Close()
 		_ = catPipeW.Close()
 		_ = encPlainW.Close()
-		_ = dumpCmd.Process.Kill()
-		_ = dumpCmd.Wait()
-		return nil, true, fmt.Errorf("start %s -tv: %w", RestoreBin, err)
+		if pipe.DumpCmd.Process != nil {
+			_ = pipe.DumpCmd.Process.Kill()
+		}
+		_ = pipe.DumpCmd.Wait()
+		return nil, true, fmt.Errorf("start TOC reader (%s): %w", pipe.TocCmd.Path, err)
 	}
 
 	var catalogCount atomic.Int64
@@ -941,12 +959,13 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 	}
 	catCh := make(chan catResult, 1)
 	go func() {
-		entries, parseErr := parseRestoreTVOutput(restoreTVStdout, mnt.MountPoint, &catalogCount)
-		// `restore -t` exits 0 as soon as BSD dump Phase III (directories) finishes; close catPipeR so pump continues cleanly.
+		entries, parseErr := pipe.ParseTOC(tocStdout, mnt.MountPoint, &catalogCount)
+		// Close catPipeR once TOC reader completes (early on BSD/ext dump Phase III, or at EOF on xfsdump).
 		_ = catPipeR.Close()
-		waitErr := restoreTVCmd.Wait()
+		waitErr := pipe.TocCmd.Wait()
 		if parseErr == nil && waitErr != nil {
-			parseErr = fmt.Errorf("restore -tv failed: %w (%s)", waitErr, strings.TrimSpace(restoreTVStderr.String()))
+			parseErr = fmt.Errorf("TOC reader (%s) failed: %w (%s)",
+				pipe.DriverName, waitErr, strings.TrimSpace(tocStderr.String()))
 		}
 		catCh <- catResult{entries: entries, err: parseErr}
 	}()
@@ -972,7 +991,6 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 				rawDumpBytes.Add(int64(n))
 				if catOpen {
 					if _, cwErr := catPipeW.Write(chunk); cwErr != nil {
-						// Expected once `restore -tv` finishes reading directory headers in Phase III.
 						catOpen = false
 						_ = catPipeW.Close()
 					}
@@ -997,22 +1015,22 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		if pumpErr != nil {
 			_ = zw.Close()
 			_ = encPlainW.CloseWithError(pumpErr)
-			if dumpCmd.Process != nil {
-				_ = dumpCmd.Process.Kill()
+			if pipe.DumpCmd.Process != nil {
+				_ = pipe.DumpCmd.Process.Kill()
 			}
-			_ = dumpCmd.Wait()
+			_ = pipe.DumpCmd.Wait()
 			pumpErrCh <- pumpErr
 			return
 		}
 
 		if closeErr := zw.Close(); closeErr != nil {
 			_ = encPlainW.CloseWithError(closeErr)
-			_ = dumpCmd.Wait()
+			_ = pipe.DumpCmd.Wait()
 			pumpErrCh <- fmt.Errorf("finalize zstd stream: %w", closeErr)
 			return
 		}
-		if dumpWaitErr := dumpCmd.Wait(); dumpWaitErr != nil {
-			wErr := fmt.Errorf("%s failed: %w (%s)", DumpBin, dumpWaitErr, strings.TrimSpace(dumpStderr.String()))
+		if dumpWaitErr := pipe.DumpCmd.Wait(); dumpWaitErr != nil {
+			wErr := fmt.Errorf("%s failed: %w (%s)", pipe.DriverName, dumpWaitErr, strings.TrimSpace(dumpStderr.String()))
 			_ = encPlainW.CloseWithError(wErr)
 			pumpErrCh <- wErr
 			return
@@ -1021,7 +1039,6 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		pumpErrCh <- nil
 	}()
 
-	// Optional progress ticker during multipart upload to S3 DEEP_ARCHIVE
 	stopProg := make(chan struct{})
 	var progWG sync.WaitGroup
 	if onProgress != nil {
@@ -1043,7 +1060,7 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 						bps = float64(raw) / elapsed
 					}
 					onProgress(DumpProgress{
-						Phase:        "Streaming dump -> zstd -> LibreSSL -> S3 DEEP_ARCHIVE",
+						Phase:        fmt.Sprintf("Streaming %s -> zstd -> %s -> S3 DEEP_ARCHIVE", pipe.DriverName, sslRT.Provider),
 						RawBytes:     raw,
 						EstRawBytes:  estBytes,
 						CipherBytes:  encStream.CiphertextBytes(),
@@ -1078,7 +1095,7 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		return nil, true, catRes.err
 	}
 
-	// 4. Upload domain-bound HMAC-SHA256 for the DEEP_ARCHIVE dump object
+	// Upload domain-bound HMAC-SHA256 for the DEEP_ARCHIVE dump object
 	_, dataHMACRec, err := encStream.SumHMAC()
 	if err != nil {
 		return nil, true, err
@@ -1087,7 +1104,7 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		return nil, true, err
 	}
 
-	// 5. Compress, cache locally (0600), encrypt, sign, and upload catalog to S3 STANDARD
+	// Compress, cache locally (0600), encrypt, sign, and upload catalog to S3 STANDARD
 	if onProgress != nil {
 		onProgress(DumpProgress{
 			Phase:        "Uploading authenticated catalog to S3 STANDARD",
@@ -1107,7 +1124,7 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		Logf(cfg, "warning: local catalog cache write failed (%s): %v", localCachePath, err)
 	}
 
-	cipherCat, listHMACRec, err := EncryptAndSignBytes(ctx, km, meta.ListKey, compressedCat)
+	cipherCat, listHMACRec, err := EncryptAndSignBytes(ctx, sslRT, km, meta.ListKey, compressedCat)
 	if err != nil {
 		return nil, true, fmt.Errorf("encrypt catalog: %w", err)
 	}
@@ -1118,9 +1135,15 @@ func (e *Engine) RunDump(ctx context.Context, mountPoint string, level int, onPr
 		return nil, true, err
 	}
 
+	if pipe.RecordDumpDates {
+		if uErr := UpdateDumpDate(dumpDatesPath, mnt, level, dumpStartTime); uErr != nil {
+			Logf(cfg, "warning: dumpdates update (%s) failed: %v", dumpDatesPath, uErr)
+		}
+	}
+
 	e.cacheCatalogInMemory(meta.BaseName, catRes.entries)
-	Logf(cfg, "dump complete: archive=%s raw_bytes=%d cipher_bytes=%d entries=%d",
-		meta.BaseName, rawDumpBytes.Load(), encStream.CiphertextBytes(), len(catRes.entries))
+	Logf(cfg, "dump complete (%s): archive=%s raw_bytes=%d cipher_bytes=%d entries=%d",
+		pipe.DriverName, meta.BaseName, rawDumpBytes.Load(), encStream.CiphertextBytes(), len(catRes.entries))
 	return &meta, true, nil
 }
 
@@ -1158,7 +1181,8 @@ func (e *Engine) LoadCatalog(ctx context.Context, meta ArchiveMeta) ([]CatalogEn
 		}
 	}
 
-	if _, err := VerifyLibreSSL(); err != nil {
+	sslRT, err := ResolveSSLRuntime(cfg)
+	if err != nil {
 		return nil, err
 	}
 	km, err := e.EnsureKeyForClient(meta.Client, false)
@@ -1181,7 +1205,7 @@ func (e *Engine) LoadCatalog(ctx context.Context, meta ArchiveMeta) ([]CatalogEn
 		return nil, fmt.Errorf("fetch catalog HMAC (%s): %w", meta.ListHMAC, err)
 	}
 
-	compressedCat, err := VerifyAndDecryptBytes(ctx, km, meta.ListKey, cipherCat, hmacRec)
+	compressedCat, err := VerifyAndDecryptBytes(ctx, sslRT, km, meta.ListKey, cipherCat, hmacRec)
 	if err != nil {
 		return nil, err
 	}
@@ -1275,7 +1299,6 @@ func (e *Engine) LoadJobs() error {
 		if err := json.Unmarshal(raw, &job); err != nil || job.ID == "" {
 			continue
 		}
-		// If a previous process exited mid-download/stage, mark interrupted jobs QUEUED so they resume cleanly.
 		if !e.runningIDs[job.ID] && (job.Status == JobDownloading || job.Status == JobVerifying || job.Status == JobCommitting) {
 			job.Status = JobQueued
 			job.SpeedBPS = 0
@@ -1429,7 +1452,6 @@ func (e *Engine) PollAndRunPendingJobs(ctx context.Context) error {
 	}
 	jobs := e.JobsSnapshot()
 	var firstErr error
-	// Process oldest pending jobs first so level-0 restores complete before incremental layers.
 	for i := len(jobs) - 1; i >= 0; i-- {
 		j := jobs[i]
 		if j.Status != JobQueued && j.Status != JobThawing {
@@ -1490,9 +1512,10 @@ func applyStatMetadata(dst string, st *unix.Stat_t) {
 	if st == nil {
 		return
 	}
+	rawMode := uint32(st.Mode)
 	_ = os.Lchown(dst, int(st.Uid), int(st.Gid))
-	if (st.Mode & unix.S_IFMT) != unix.S_IFLNK {
-		_ = os.Chmod(dst, os.FileMode(st.Mode&07777))
+	if (rawMode & unix.S_IFMT) != unix.S_IFLNK {
+		_ = os.Chmod(dst, os.FileMode(rawMode&07777))
 	}
 	ts := []unix.Timespec{st.Atim, st.Mtim}
 	_ = unix.UtimesNanoAt(unix.AT_FDCWD, dst, ts, unix.AT_SYMLINK_NOFOLLOW)
@@ -1502,7 +1525,8 @@ func copySingleFileCrossFS(src, dst string, st *unix.Stat_t) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
-	switch st.Mode & unix.S_IFMT {
+	rawMode := uint32(st.Mode)
+	switch rawMode & unix.S_IFMT {
 	case unix.S_IFLNK:
 		target, err := os.Readlink(src)
 		if err != nil {
@@ -1517,7 +1541,7 @@ func copySingleFileCrossFS(src, dst string, st *unix.Stat_t) error {
 
 	case unix.S_IFIFO:
 		_ = os.Remove(dst)
-		if err := unix.Mkfifo(dst, st.Mode&07777); err != nil {
+		if err := unix.Mkfifo(dst, rawMode&07777); err != nil {
 			return err
 		}
 		applyStatMetadata(dst, st)
@@ -1525,7 +1549,7 @@ func copySingleFileCrossFS(src, dst string, st *unix.Stat_t) error {
 
 	case unix.S_IFCHR, unix.S_IFBLK:
 		_ = os.Remove(dst)
-		if err := unix.Mknod(dst, st.Mode, int(st.Rdev)); err != nil {
+		if err := unix.Mknod(dst, rawMode, int(st.Rdev)); err != nil {
 			return err
 		}
 		applyStatMetadata(dst, st)
@@ -1539,7 +1563,7 @@ func copySingleFileCrossFS(src, dst string, st *unix.Stat_t) error {
 		defer in.Close()
 
 		tmpDst := fmt.Sprintf("%s.tardis_tmp_%d", dst, os.Getpid())
-		out, err := os.OpenFile(tmpDst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(st.Mode&0777))
+		out, err := os.OpenFile(tmpDst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(rawMode&0777))
 		if err != nil {
 			return err
 		}
@@ -1580,7 +1604,8 @@ func commitNode(src, dst string, count *int) error {
 		return fmt.Errorf("lstat staged path %s: %w", src, err)
 	}
 
-	if (st.Mode & unix.S_IFMT) != unix.S_IFDIR {
+	rawMode := uint32(st.Mode)
+	if (rawMode & unix.S_IFMT) != unix.S_IFDIR {
 		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 			return err
 		}
@@ -1605,13 +1630,12 @@ func commitNode(src, dst string, count *int) error {
 		return nil
 	}
 
-	// Directory: merge children recursively without deleting untouched live files in dst
 	if dstInfo, err := os.Lstat(dst); err == nil && !dstInfo.IsDir() {
 		if rmErr := os.Remove(dst); rmErr != nil {
 			return fmt.Errorf("replace file %s with directory: %w", dst, rmErr)
 		}
 	}
-	if err := os.MkdirAll(dst, os.FileMode(st.Mode&0777)); err != nil {
+	if err := os.MkdirAll(dst, os.FileMode(rawMode&0777)); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dst, err)
 	}
 
@@ -1620,10 +1644,11 @@ func commitNode(src, dst string, count *int) error {
 		return fmt.Errorf("readdir staged %s: %w", src, err)
 	}
 	for _, de := range entries {
-		if de.Name() == "restoresymtable" {
+		name := de.Name()
+		if name == "restoresymtable" || strings.HasPrefix(name, "xfsrestorehousekeeping") {
 			continue
 		}
-		if err := commitNode(filepath.Join(src, de.Name()), filepath.Join(dst, de.Name()), count); err != nil {
+		if err := commitNode(filepath.Join(src, name), filepath.Join(dst, name), count); err != nil {
 			return err
 		}
 	}
@@ -1635,7 +1660,6 @@ func resolveNewPathTarget(mountPoint, relPath, rawDest string, multiItem bool) s
 	dest := strings.TrimSpace(rawDest)
 	origFull := filepath.Join(mountPoint, relPath)
 
-	// Suffix shorthand (e.g. ".restored" or ".bak") places restored copy beside original item
 	if !strings.Contains(dest, "/") && (strings.HasPrefix(dest, ".") || strings.HasPrefix(dest, "~")) {
 		return origFull + dest
 	}
@@ -1647,7 +1671,6 @@ func resolveNewPathTarget(mountPoint, relPath, rawDest string, multiItem bool) s
 		return filepath.Join(dest, relPath)
 	}
 
-	// Single marked item
 	if !strings.Contains(dest, "/") {
 		return filepath.Join(filepath.Dir(origFull), dest)
 	}
@@ -1739,11 +1762,12 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 	}
 	defer lock.Release()
 
-	if _, err := VerifyLibreSSL(); err != nil {
+	sslRT, err := ResolveSSLRuntime(cfg)
+	if err != nil {
 		snap := e.updateJob(id, true, func(j *RestoreJob) {
 			j.Status = JobFailed
 			j.Error = err.Error()
-			j.Message = "LibreSSL verification failed"
+			j.Message = "SSL runtime resolution failed"
 		})
 		notify(snap)
 		return err
@@ -1793,7 +1817,6 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 		return mErr
 	}
 
-	// Create isolated 0700 staging directory on the target mountpoint for atomic rename(2) after HMAC check
 	stageDir := filepath.Join(jobSnap.MountPoint, ".tardis_stage_"+jobSnap.ID)
 	_ = os.RemoveAll(stageDir)
 	if err := os.MkdirAll(stageDir, 0700); err != nil {
@@ -1825,16 +1848,16 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 		j.Status = JobDownloading
 		j.TotalBytes = contentLen
 		j.DoneBytes = 0
-		j.Message = "Streaming S3 -> HMAC-SHA256 -> LibreSSL -> zstd -> staging"
+		j.Message = fmt.Sprintf("Streaming S3 -> HMAC-SHA256 -> %s -> zstd -> staging", sslRT.Provider)
 	})
 	notify(snap)
 
-	decStream, err := NewDecryptStream(ctx, km, jobSnap.Archive.DataKey, expectedMAC, s3Body)
+	decStream, err := NewDecryptStream(ctx, sslRT, km, jobSnap.Archive.DataKey, expectedMAC, s3Body)
 	if err != nil {
 		snap = e.updateJob(id, true, func(j *RestoreJob) {
 			j.Status = JobFailed
 			j.Error = err.Error()
-			j.Message = "Failed to start LibreSSL decryption"
+			j.Message = "Failed to start decryption stream"
 		})
 		notify(snap)
 		return err
@@ -1853,20 +1876,31 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 	}
 	defer zstdDec.Close()
 
-	restoreArgs := []string{"-x", "-y", "-f", "-"}
-	if !jobSnap.FullSnapshot && len(jobSnap.MarkedPaths) > 0 {
-		for _, p := range jobSnap.MarkedPaths {
-			cleanRel := strings.Trim(strings.TrimPrefix(p, "./"), "/")
-			if cleanRel != "" {
-				restoreArgs = append(restoreArgs, escapeRestoreGlob(cleanRel))
-			}
-		}
+	// Peek decompressed magic header (without consuming bytes) so Linux auto-selects restore vs xfsrestore
+	peekReader := bufio.NewReaderSize(zstdDec, 64*1024)
+	magicHeader, peekErr := peekReader.Peek(16)
+	if len(magicHeader) == 0 && peekErr != nil && peekErr != io.EOF {
+		snap = e.updateJob(id, true, func(j *RestoreJob) {
+			j.Status = JobFailed
+			j.Error = peekErr.Error()
+			j.Message = "Stream decryption/decompression failed on archive header"
+		})
+		notify(snap)
+		return peekErr
+	}
+
+	restoreCmd, err := BuildRestoreCmd(ctx, magicHeader, stageDir, jobSnap.MountPoint, jobSnap.MarkedPaths, jobSnap.FullSnapshot)
+	if err != nil {
+		snap = e.updateJob(id, true, func(j *RestoreJob) {
+			j.Status = JobFailed
+			j.Error = err.Error()
+			j.Message = err.Error()
+		})
+		notify(snap)
+		return err
 	}
 
 	resStdinR, resStdinW := io.Pipe()
-	restoreCmd := exec.CommandContext(ctx, RestoreBin, restoreArgs...)
-	restoreCmd.Dir = stageDir
-	restoreCmd.SysProcAttr = &unix.SysProcAttr{Setsid: true} // Detach /dev/tty so restore never prompts interactively
 	restoreCmd.Stdin = resStdinR
 	var restoreStderr bytes.Buffer
 	restoreCmd.Stderr = &restoreStderr
@@ -1877,7 +1911,7 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 		snap = e.updateJob(id, true, func(j *RestoreJob) {
 			j.Status = JobFailed
 			j.Error = err.Error()
-			j.Message = "Failed to start /sbin/restore"
+			j.Message = "Failed to start restore tool"
 		})
 		notify(snap)
 		return err
@@ -1885,7 +1919,7 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 
 	copyErrCh := make(chan error, 1)
 	go func() {
-		_, cErr := io.Copy(resStdinW, zstdDec)
+		_, cErr := io.Copy(resStdinW, peekReader)
 		_ = resStdinW.Close()
 		copyErrCh <- cErr
 	}()
@@ -1925,7 +1959,7 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 	if restoreWaitErr != nil {
 		close(stopProg)
 		progWG.Wait()
-		errMsg := fmt.Errorf("%s failed: %w (%s)", RestoreBin, restoreWaitErr, strings.TrimSpace(restoreStderr.String()))
+		errMsg := fmt.Errorf("%s failed: %w (%s)", filepath.Base(restoreCmd.Path), restoreWaitErr, strings.TrimSpace(restoreStderr.String()))
 		if copyErr != nil && !errors.Is(copyErr, io.ErrClosedPipe) && !errors.Is(copyErr, unix.EPIPE) {
 			errMsg = fmt.Errorf("%v (stream error: %v)", errMsg, copyErr)
 		}
@@ -2088,7 +2122,6 @@ func (e *Engine) RunCLIRestore(
 		if latest.Status == JobFailed {
 			return errors.New(latest.Error)
 		}
-		// Still THAWING in Glacier Deep Archive: poll every 15 minutes until ready or Ctrl+C
 		if onProgress != nil {
 			onProgress(latest)
 		}

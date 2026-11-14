@@ -1,4 +1,4 @@
-//go:build openbsd
+//go:build openbsd || linux
 
 package main
 
@@ -22,29 +22,31 @@ func isTerminal(f *os.File) bool {
 	if f == nil {
 		return false
 	}
-	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TIOCGETA)
+	_, err := getTermios(int(f.Fd()))
 	return err == nil
 }
 
 func printUsage(w io.Writer, prog string) {
-	fmt.Fprintf(w, "usage: %s [-u | -J | -S] [-f config] [-b bucket] [-c client] [-k key]\n", prog)
+	fmt.Fprintf(w, "usage: %s [-u | -J | -S] [-f config] [-b bucket] [-c client] [-k key] [-O openssl]\n", prog)
 	fmt.Fprintf(w, "       %*s [-m mount [-d 0..9 | -r archive [-t Standard|Bulk] [-o dest]]]\n", len(prog), "")
 	fmt.Fprintf(w, "       %*s [-q ALL|STANDARD|DEEP_ARCHIVE] [-D archive_or_object]\n\n", len(prog), "")
 	fmt.Fprintf(w, "modes:\n")
 	fmt.Fprintf(w, "  (no action)  launch interactive console UI when attached to a TTY\n")
 	fmt.Fprintf(w, "  -u, --ui     launch interactive console UI\n")
 	fmt.Fprintf(w, "  -d level     dump filesystem at -m (level 0..9) to S3 DEEP_ARCHIVE + STANDARD catalog\n")
-	fmt.Fprintf(w, "  -r archive   restore archive into -m (auto-initiates/polls Glacier thaw if frozen)\n")
+	fmt.Fprintf(w, "               (OpenBSD: ffs dump | Linux: ext2/3/4 dump or xfs xfsdump)\n")
+	fmt.Fprintf(w, "  -r archive   restore archive into -m (auto-detects restore/xfsrestore & Glacier thaw)\n")
 	fmt.Fprintf(w, "  -J           poll and execute pending/thawing restore jobs (cron-friendly)\n")
 	fmt.Fprintf(w, "  -q class     query S3 objects for client (ALL | STANDARD | DEEP_ARCHIVE)\n")
 	fmt.Fprintf(w, "  -D target    delete snapshot base name (all 4 objects) or single S3 object\n")
-	fmt.Fprintf(w, "  -S           run LibreSSL ChaCha20+PBKDF2+HMAC-SHA256 & S3 self-test\n\n")
+	fmt.Fprintf(w, "  -S           verify SSL ChaCha20+PBKDF2+HMAC-SHA256, host dump tools, & S3 access\n\n")
 	fmt.Fprintf(w, "options:\n")
 	fmt.Fprintf(w, "  -f path      configuration file (default %s)\n", DefaultConfigFile)
 	fmt.Fprintf(w, "  -b bucket    S3 bucket name\n")
 	fmt.Fprintf(w, "  -c client    client identifier (default short hostname)\n")
-	fmt.Fprintf(w, "  -k path      LibreSSL/HMAC 0400 keyfile path\n")
-	fmt.Fprintf(w, "  -m mount     OpenBSD FFS mountpoint (e.g. /, /var, /home)\n")
+	fmt.Fprintf(w, "  -k path      0400 master keyfile path\n")
+	fmt.Fprintf(w, "  -O path      override openssl/libressl binary path\n")
+	fmt.Fprintf(w, "  -m mount     mounted filesystem path (e.g. /, /var, /home)\n")
 	fmt.Fprintf(w, "  -t tier      Glacier retrieval tier: Standard (3-5h) | Bulk (5-12h)\n")
 	fmt.Fprintf(w, "  -o dest      restore to alternate filename/directory instead of overwriting\n")
 }
@@ -71,6 +73,8 @@ func parseCLI(prog string, args []string) (CLIOptions, bool, bool, error) {
 	fs.StringVar(&opts.Bucket, "b", "", "S3 bucket")
 	fs.StringVar(&opts.Client, "c", "", "client name")
 	fs.StringVar(&opts.KeyPath, "k", "", "keyfile path")
+	fs.StringVar(&opts.OpenSSLBin, "O", "", "openssl binary path")
+	fs.StringVar(&opts.OpenSSLBin, "openssl", "", "openssl binary path")
 	fs.StringVar(&opts.Tier, "t", "", "Glacier tier")
 	fs.StringVar(&opts.Mount, "m", "", "mountpoint")
 	fs.IntVar(&opts.DumpLevel, "d", -1, "dump level")
@@ -207,7 +211,7 @@ func runSelfTest(ctx context.Context, eng *Engine) error {
 	}
 	defer km.Wipe()
 
-	ver, err := SelfTestLibreSSL(ctx, km)
+	rt, err := SelfTestSSL(ctx, cfg, km)
 	if err != nil {
 		return err
 	}
@@ -215,11 +219,16 @@ func runSelfTest(ctx context.Context, eng *Engine) error {
 	if km.Created {
 		keyAction = "generated (0400)"
 	}
-	fmt.Printf("crypto : PASS — %s | ChaCha20-PBKDF2(100k) + HMAC-SHA256\n", ver)
-	fmt.Printf("keyfile: %s [%s, id=%s]\n", km.Path, keyAction, km.Fingerprint())
+
+	fmt.Printf("%-11s: %s (dumpdates=%s)\n", "platform", PlatformName, cfg.EffectiveDumpDatesPath())
+	fmt.Printf("%-11s: PASS — %s (%s, %s + PBKDF2-100k + HMAC-SHA256)\n", "crypto", rt.Version, rt.Binary, rt.CipherFlag)
+	fmt.Printf("%-11s: %s [%s, id=%s]\n", "keyfile", km.Path, keyAction, km.Fingerprint())
+	for _, line := range ProbeHostTools() {
+		fmt.Println(line)
+	}
 
 	if strings.TrimSpace(cfg.Bucket) == "" {
-		fmt.Printf("s3     : SKIPPED — bucket not configured yet (use -b or TUI Settings)\n")
+		fmt.Printf("%-11s: SKIPPED — bucket not configured yet (use -b or TUI Settings)\n", "s3")
 		return nil
 	}
 	store, err := eng.NewStore(ctx)
@@ -229,7 +238,7 @@ func runSelfTest(ctx context.Context, eng *Engine) error {
 	if err := store.TestConnection(ctx, client); err != nil {
 		return err
 	}
-	fmt.Printf("s3     : PASS — s3://%s/%s/ reachable (%s)\n", cfg.Bucket, client, cfg.Region)
+	fmt.Printf("%-11s: PASS — s3://%s/%s/ reachable (%s)\n", "s3", cfg.Bucket, client, cfg.Region)
 	return nil
 }
 

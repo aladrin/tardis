@@ -1,4 +1,4 @@
-//go:build openbsd
+//go:build openbsd || linux
 
 package main
 
@@ -26,7 +26,6 @@ import (
 const (
 	TardisDomainTag  = "TARDIS-V2\x00"
 	TardisKeyIDTag   = "TARDIS-KEY-ID\x00"
-	LibreSSLCipher   = "-chacha"
 	PBKDF2Iterations = "100000"
 	KeyHexTotalLen   = 128 // 64 hex chars (256-bit enc secret) + 64 hex chars (256-bit MAC key)
 )
@@ -36,10 +35,27 @@ var (
 	ErrStreamIncomplete = errors.New("cryptographic stream did not complete cleanly")
 )
 
+// SSLRuntime describes the validated SSL CLI provider (OpenBSD LibreSSL, Linux LibreSSL, or Linux OpenSSL).
+type SSLRuntime struct {
+	Binary        string
+	Version       string
+	Provider      string // "LibreSSL" or "OpenSSL"
+	CipherFlag    string // "-chacha" (LibreSSL) or "-chacha20" (OpenSSL)
+	LDLibraryPath string
+}
+
+// Summary returns a concise display label for headers and logs.
+func (rt *SSLRuntime) Summary() string {
+	if rt == nil {
+		return "SSL:UNRESOLVED"
+	}
+	return fmt.Sprintf("%s [%s]", rt.Version, rt.CipherFlag)
+}
+
 // KeyMaterial holds domain-separated encryption and authentication secrets loaded from a 0400 keyfile.
 type KeyMaterial struct {
 	Path      string
-	EncSecret []byte // 64 ASCII hex bytes passed to LibreSSL via fd:3 (zero NUL/LF truncation risk)
+	EncSecret []byte // 64 ASCII hex bytes passed via fd:3 (zero NUL/LF truncation risk)
 	MACKey    []byte // 32 raw bytes used for domain-bound HMAC-SHA256
 	Created   bool
 }
@@ -64,20 +80,6 @@ func (k *KeyMaterial) Wipe() {
 	clear(k.MACKey)
 }
 
-// VerifyLibreSSL confirms /usr/bin/openssl is present and reports as OpenBSD LibreSSL.
-func VerifyLibreSSL() (string, error) {
-	out, err := exec.Command(OpenSSLBin, "version").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("execute %s version: %w", OpenSSLBin, err)
-	}
-	ver := strings.TrimSpace(string(out))
-	fields := strings.Fields(ver)
-	if len(fields) == 0 || fields[0] != "LibreSSL" {
-		return ver, fmt.Errorf("tardis: LibreSSL required, got %q", ver)
-	}
-	return ver, nil
-}
-
 // LoadKey reads and validates an existing 0400/0600-restricted Tardis keyfile without following symlinks.
 func LoadKey(path string) (*KeyMaterial, error) {
 	if strings.TrimSpace(path) == "" {
@@ -88,7 +90,7 @@ func LoadKey(path string) (*KeyMaterial, error) {
 		if errors.Is(err, unix.ENOENT) {
 			return nil, os.ErrNotExist
 		}
-		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EFTYPE) {
+		if isSymlinkOpenErr(err) {
 			return nil, fmt.Errorf("refusing symlink keyfile %s", path)
 		}
 		return nil, fmt.Errorf("open keyfile %s: %w", path, err)
@@ -100,11 +102,12 @@ func LoadKey(path string) (*KeyMaterial, error) {
 	if err := unix.Fstat(fd, &st); err != nil {
 		return nil, fmt.Errorf("fstat keyfile %s: %w", path, err)
 	}
-	if (st.Mode & unix.S_IFMT) != unix.S_IFREG {
+	mode := uint32(st.Mode)
+	if (mode & unix.S_IFMT) != unix.S_IFREG {
 		return nil, fmt.Errorf("keyfile %s is not a regular file", path)
 	}
-	if (st.Mode & 0077) != 0 {
-		return nil, fmt.Errorf("keyfile %s has insecure permissions %#o (require chmod 0400)", path, st.Mode&0777)
+	if (mode & 0077) != 0 {
+		return nil, fmt.Errorf("keyfile %s has insecure permissions %#o (require chmod 0400)", path, mode&0777)
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(f, 256))
@@ -167,6 +170,9 @@ func LoadOrCreateKey(path string) (*KeyMaterial, error) {
 	if openErr != nil {
 		if errors.Is(openErr, unix.EEXIST) {
 			return LoadKey(path)
+		}
+		if isSymlinkOpenErr(openErr) {
+			return nil, fmt.Errorf("refusing symlink keyfile %s", path)
 		}
 		return nil, fmt.Errorf("atomic create keyfile %s: %w", path, openErr)
 	}
@@ -241,12 +247,13 @@ func ParseHMACRecord(raw []byte, expectedObjectKey string) ([]byte, error) {
 	return sum, nil
 }
 
-// EncryptStream streams plaintext through LibreSSL ChaCha20 (PBKDF2) and computes a domain-bound HMAC-SHA256.
+// EncryptStream streams plaintext through ChaCha20 (PBKDF2) and computes a domain-bound HMAC-SHA256.
 type EncryptStream struct {
 	cmd         *exec.Cmd
 	stdout      io.ReadCloser
 	stderr      bytes.Buffer
 	mac         hash.Hash
+	provider    string
 	objectKey   string
 	cipherBytes atomic.Int64
 
@@ -255,8 +262,11 @@ type EncryptStream struct {
 	finishErr  error
 }
 
-// NewEncryptStream starts `/usr/bin/openssl enc -chacha -pbkdf2 -iter 100000 -salt -e -pass fd:3`.
-func NewEncryptStream(ctx context.Context, km *KeyMaterial, objectKey string, plain io.Reader) (*EncryptStream, error) {
+// NewEncryptStream starts `<openssl> enc <cipher> -pbkdf2 -iter 100000 -salt -e -pass fd:3`.
+func NewEncryptStream(ctx context.Context, rt *SSLRuntime, km *KeyMaterial, objectKey string, plain io.Reader) (*EncryptStream, error) {
+	if rt == nil || strings.TrimSpace(rt.Binary) == "" || strings.TrimSpace(rt.CipherFlag) == "" {
+		return nil, errors.New("unresolved SSL runtime")
+	}
 	if km == nil || len(km.EncSecret) != 64 || len(km.MACKey) != 32 {
 		return nil, errors.New("invalid key material")
 	}
@@ -271,15 +281,18 @@ func NewEncryptStream(ctx context.Context, km *KeyMaterial, objectKey string, pl
 
 	cmd := exec.CommandContext(
 		ctx,
-		OpenSSLBin,
+		rt.Binary,
 		"enc",
-		LibreSSLCipher,
+		rt.CipherFlag,
 		"-pbkdf2",
 		"-iter", PBKDF2Iterations,
 		"-salt",
 		"-e",
 		"-pass", "fd:3",
 	)
+	if rt.LDLibraryPath != "" {
+		cmd.Env = applyLDLibraryPath(os.Environ(), rt.LDLibraryPath)
+	}
 	cmd.SysProcAttr = &unix.SysProcAttr{Setsid: true}
 	cmd.Stdin = plain
 	cmd.ExtraFiles = []*os.File{passR} // Child fd:3
@@ -287,6 +300,7 @@ func NewEncryptStream(ctx context.Context, km *KeyMaterial, objectKey string, pl
 	es := &EncryptStream{
 		cmd:       cmd,
 		mac:       NewObjectMAC(km.MACKey, objectKey),
+		provider:  rt.Provider,
 		objectKey: objectKey,
 	}
 	cmd.Stderr = &es.stderr
@@ -295,14 +309,14 @@ func NewEncryptStream(ctx context.Context, km *KeyMaterial, objectKey string, pl
 	if err != nil {
 		_ = passR.Close()
 		_ = passW.Close()
-		return nil, fmt.Errorf("attach libressl stdout: %w", err)
+		return nil, fmt.Errorf("attach %s stdout: %w", rt.Provider, err)
 	}
 	es.stdout = stdout
 
 	if err := cmd.Start(); err != nil {
 		_ = passR.Close()
 		_ = passW.Close()
-		return nil, fmt.Errorf("start libressl encrypt: %w", err)
+		return nil, fmt.Errorf("start %s encrypt: %w", rt.Provider, err)
 	}
 	_ = passR.Close()
 
@@ -355,8 +369,8 @@ func (e *EncryptStream) finalize(abort bool) error {
 			return
 		}
 		if waitErr != nil {
-			e.finishErr = fmt.Errorf("libressl encrypt failed (%s): %w (%s)",
-				e.objectKey, waitErr, strings.TrimSpace(e.stderr.String()))
+			e.finishErr = fmt.Errorf("%s encrypt failed (%s): %w (%s)",
+				e.provider, e.objectKey, waitErr, strings.TrimSpace(e.stderr.String()))
 			return
 		}
 		e.completed = true
@@ -381,7 +395,7 @@ func (e *EncryptStream) SumHMAC() ([]byte, []byte, error) {
 	return sum, FormatHMACRecord(sum, e.objectKey), nil
 }
 
-// Close aborts or reaps the underlying LibreSSL child process.
+// Close aborts or reaps the underlying SSL child process.
 func (e *EncryptStream) Close() error {
 	return e.finalize(true)
 }
@@ -401,13 +415,14 @@ func (m *macTrackingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// DecryptStream verifies domain-bound HMAC-SHA256 over ciphertext while streaming plaintext from LibreSSL.
+// DecryptStream verifies domain-bound HMAC-SHA256 over ciphertext while streaming plaintext from OpenSSL/LibreSSL.
 type DecryptStream struct {
 	cmd         *exec.Cmd
 	stdout      io.ReadCloser
 	stderr      bytes.Buffer
 	macReader   *macTrackingReader
 	expectedMAC []byte
+	provider    string
 	objectKey   string
 
 	finishOnce sync.Once
@@ -416,8 +431,11 @@ type DecryptStream struct {
 	finishErr  error
 }
 
-// NewDecryptStream starts `/usr/bin/openssl enc -chacha -pbkdf2 -iter 100000 -salt -d -pass fd:3`.
-func NewDecryptStream(ctx context.Context, km *KeyMaterial, objectKey string, expectedMAC []byte, cipher io.Reader) (*DecryptStream, error) {
+// NewDecryptStream starts `<openssl> enc <cipher> -pbkdf2 -iter 100000 -salt -d -pass fd:3`.
+func NewDecryptStream(ctx context.Context, rt *SSLRuntime, km *KeyMaterial, objectKey string, expectedMAC []byte, cipher io.Reader) (*DecryptStream, error) {
+	if rt == nil || strings.TrimSpace(rt.Binary) == "" || strings.TrimSpace(rt.CipherFlag) == "" {
+		return nil, errors.New("unresolved SSL runtime")
+	}
 	if km == nil || len(km.EncSecret) != 64 || len(km.MACKey) != 32 {
 		return nil, errors.New("invalid key material")
 	}
@@ -437,15 +455,18 @@ func NewDecryptStream(ctx context.Context, km *KeyMaterial, objectKey string, ex
 
 	cmd := exec.CommandContext(
 		ctx,
-		OpenSSLBin,
+		rt.Binary,
 		"enc",
-		LibreSSLCipher,
+		rt.CipherFlag,
 		"-pbkdf2",
 		"-iter", PBKDF2Iterations,
 		"-salt",
 		"-d",
 		"-pass", "fd:3",
 	)
+	if rt.LDLibraryPath != "" {
+		cmd.Env = applyLDLibraryPath(os.Environ(), rt.LDLibraryPath)
+	}
 	cmd.SysProcAttr = &unix.SysProcAttr{Setsid: true}
 	cmd.Stdin = mr
 	cmd.ExtraFiles = []*os.File{passR} // Child fd:3
@@ -454,6 +475,7 @@ func NewDecryptStream(ctx context.Context, km *KeyMaterial, objectKey string, ex
 		cmd:         cmd,
 		macReader:   mr,
 		expectedMAC: bytes.Clone(expectedMAC),
+		provider:    rt.Provider,
 		objectKey:   objectKey,
 	}
 	cmd.Stderr = &ds.stderr
@@ -462,14 +484,14 @@ func NewDecryptStream(ctx context.Context, km *KeyMaterial, objectKey string, ex
 	if err != nil {
 		_ = passR.Close()
 		_ = passW.Close()
-		return nil, fmt.Errorf("attach libressl stdout: %w", err)
+		return nil, fmt.Errorf("attach %s stdout: %w", rt.Provider, err)
 	}
 	ds.stdout = stdout
 
 	if err := cmd.Start(); err != nil {
 		_ = passR.Close()
 		_ = passW.Close()
-		return nil, fmt.Errorf("start libressl decrypt: %w", err)
+		return nil, fmt.Errorf("start %s decrypt: %w", rt.Provider, err)
 	}
 	_ = passR.Close()
 
@@ -507,11 +529,11 @@ func (d *DecryptStream) completeAndVerify(allowEarlyPipeClose bool) error {
 		_ = d.stdout.Close()
 		waitErr := d.cmd.Wait()
 		if waitErr != nil && !allowEarlyPipeClose {
-			d.finishErr = fmt.Errorf("libressl decrypt failed (%s): %w (%s)",
-				d.objectKey, waitErr, strings.TrimSpace(d.stderr.String()))
+			d.finishErr = fmt.Errorf("%s decrypt failed (%s): %w (%s)",
+				d.provider, d.objectKey, strings.TrimSpace(d.stderr.String()))
 			return
 		}
-		// Drain any unread tail so full-object HMAC-SHA256 is verified even when `restore -x` exits early.
+		// Drain any unread tail so full-object HMAC-SHA256 is verified even when selective restore exits early.
 		if _, err := io.Copy(io.Discard, d.macReader); err != nil {
 			d.finishErr = fmt.Errorf("drain ciphertext for HMAC check (%s): %w", d.objectKey, err)
 			return
@@ -553,9 +575,9 @@ func (d *DecryptStream) Close() error {
 	return d.finishErr
 }
 
-// EncryptAndSignBytes encrypts an in-memory buffer via LibreSSL and returns ciphertext plus formatted `.hmac` record.
-func EncryptAndSignBytes(ctx context.Context, km *KeyMaterial, objectKey string, plain []byte) ([]byte, []byte, error) {
-	enc, err := NewEncryptStream(ctx, km, objectKey, bytes.NewReader(plain))
+// EncryptAndSignBytes encrypts an in-memory buffer and returns ciphertext plus formatted `.hmac` record.
+func EncryptAndSignBytes(ctx context.Context, rt *SSLRuntime, km *KeyMaterial, objectKey string, plain []byte) ([]byte, []byte, error) {
+	enc, err := NewEncryptStream(ctx, rt, km, objectKey, bytes.NewReader(plain))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -573,7 +595,7 @@ func EncryptAndSignBytes(ctx context.Context, km *KeyMaterial, objectKey string,
 }
 
 // VerifyAndDecryptBytes verifies `.hmac` authenticity before and after decrypting an in-memory ciphertext buffer.
-func VerifyAndDecryptBytes(ctx context.Context, km *KeyMaterial, objectKey string, cipher []byte, hmacRecord []byte) ([]byte, error) {
+func VerifyAndDecryptBytes(ctx context.Context, rt *SSLRuntime, km *KeyMaterial, objectKey string, cipher []byte, hmacRecord []byte) ([]byte, error) {
 	expectedMAC, err := ParseHMACRecord(hmacRecord, objectKey)
 	if err != nil {
 		return nil, err
@@ -584,7 +606,7 @@ func VerifyAndDecryptBytes(ctx context.Context, km *KeyMaterial, objectKey strin
 		return nil, fmt.Errorf("%w (%s)", ErrHMACMismatch, objectKey)
 	}
 
-	dec, err := NewDecryptStream(ctx, km, objectKey, expectedMAC, bytes.NewReader(cipher))
+	dec, err := NewDecryptStream(ctx, rt, km, objectKey, expectedMAC, bytes.NewReader(cipher))
 	if err != nil {
 		return nil, err
 	}
@@ -600,33 +622,32 @@ func VerifyAndDecryptBytes(ctx context.Context, km *KeyMaterial, objectKey strin
 	return plain, nil
 }
 
-// SelfTestLibreSSL performs a live LibreSSL fd:3 ChaCha20 + PBKDF2 + HMAC-SHA256 round-trip check.
-func SelfTestLibreSSL(ctx context.Context, km *KeyMaterial) (string, error) {
-	ver, err := VerifyLibreSSL()
+// SelfTestSSL performs a live fd:3 ChaCha20 + PBKDF2 + HMAC-SHA256 round-trip and tamper-rejection test.
+func SelfTestSSL(ctx context.Context, cfg *Config, km *KeyMaterial) (*SSLRuntime, error) {
+	rt, err := ResolveSSLRuntime(cfg)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	probe := []byte("tardis-openbsd-libressl-selftest-probe")
+	probe := []byte("tardis-crypto-selftest-probe")
 	const testKey = "_selftest/probe.dat"
 
-	cipher, hmacRec, err := EncryptAndSignBytes(ctx, km, testKey, probe)
+	cipher, hmacRec, err := EncryptAndSignBytes(ctx, rt, km, testKey, probe)
 	if err != nil {
-		return ver, fmt.Errorf("encrypt self-test: %w", err)
+		return rt, fmt.Errorf("encrypt self-test: %w", err)
 	}
-	out, err := VerifyAndDecryptBytes(ctx, km, testKey, cipher, hmacRec)
+	out, err := VerifyAndDecryptBytes(ctx, rt, km, testKey, cipher, hmacRec)
 	if err != nil {
-		return ver, fmt.Errorf("decrypt self-test: %w", err)
+		return rt, fmt.Errorf("decrypt self-test: %w", err)
 	}
 	if !bytes.Equal(out, probe) {
-		return ver, errors.New("self-test plaintext mismatch")
+		return rt, errors.New("self-test plaintext mismatch")
 	}
 
-	// Confirm bit-flip detection rejects tampered ciphertext.
 	tampered := bytes.Clone(cipher)
 	tampered[len(tampered)-1] ^= 0x01
-	if _, err := VerifyAndDecryptBytes(ctx, km, testKey, tampered, hmacRec); !errors.Is(err, ErrHMACMismatch) {
-		return ver, errors.New("self-test failed to reject tampered ciphertext")
+	if _, err := VerifyAndDecryptBytes(ctx, rt, km, testKey, tampered, hmacRec); !errors.Is(err, ErrHMACMismatch) {
+		return rt, errors.New("self-test failed to reject tampered ciphertext")
 	}
 
-	return ver, nil
+	return rt, nil
 }

@@ -1,4 +1,4 @@
-//go:build openbsd
+//go:build openbsd || linux
 
 package main
 
@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,17 +22,11 @@ const (
 	DefaultDBDir      = "/var/db/tardis"
 	DefaultLockFile   = "/var/run/tardis.lock"
 	DefaultLogFile    = "/var/log/tardis"
-	DumpDatesPath     = "/etc/dumpdates"
-
-	OpenSSLBin = "/usr/bin/openssl"
-	DumpBin    = "/sbin/dump"
-	RestoreBin = "/sbin/restore"
-	MountBin   = "/sbin/mount"
 
 	ArchiveTimeLayout = "2006-01-02_15:04:05"
 )
 
-// Config holds persistent S3, cryptographic, and local path settings.
+// Config holds persistent S3, SSL/cryptographic, and local OS path settings.
 type Config struct {
 	Bucket          string `json:"bucket"`
 	Region          string `json:"region"`
@@ -45,6 +38,9 @@ type Config struct {
 	Client          string `json:"client"`
 	KeyPath         string `json:"key_path"`
 	DefaultTier     string `json:"default_tier"`
+	OpenSSLBin      string `json:"openssl_bin,omitempty"`
+	LDLibraryPath   string `json:"ld_library_path,omitempty"`
+	DumpDatesFile   string `json:"dumpdates_file,omitempty"`
 	ConfigDir       string `json:"config_dir"`
 	DBDir           string `json:"db_dir"`
 	LockFile        string `json:"lock_file"`
@@ -57,12 +53,13 @@ type CLIOptions struct {
 	Bucket     string
 	Client     string
 	KeyPath    string
+	OpenSSLBin string
 	Tier       string
 	Mount      string
 	DumpLevel  int    // -1 when unset
 	RestoreObj string // -r archive name
 	RestoreDst string // -o optional alternate destination path
-	DeleteObj  string // -D object name
+	DeleteObj  string // -D object or snapshot base name
 	QueryMode  string // -q ALL|STANDARD|DEEP_ARCHIVE
 	RunJobs    bool   // -J poll and execute pending restore jobs
 	ForceTUI   bool   // -u force interactive TUI
@@ -72,7 +69,7 @@ type CLIOptions struct {
 func DefaultHostnameShort() string {
 	h, err := os.Hostname()
 	if err != nil || strings.TrimSpace(h) == "" {
-		return "openbsd"
+		return strings.ToLower(PlatformName)
 	}
 	h = strings.TrimSpace(h)
 	if idx := strings.IndexByte(h, '.'); idx > 0 {
@@ -89,7 +86,7 @@ func NormalizeTier(tier string) string {
 	return "Bulk"
 }
 
-// DefaultConfig returns a baseline configuration populated with system defaults.
+// DefaultConfig returns a baseline configuration populated with OS-appropriate defaults.
 func DefaultConfig() *Config {
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
@@ -98,20 +95,21 @@ func DefaultConfig() *Config {
 	if region == "" {
 		region = "ap-southeast-2"
 	}
-	cfg := &Config{
-		Region:      region,
-		AWSProfile:  os.Getenv("AWS_PROFILE"),
-		Client:      DefaultHostnameShort(),
-		DefaultTier: "Bulk",
-		ConfigDir:   DefaultConfigDir,
-		DBDir:       DefaultDBDir,
-		LockFile:    DefaultLockFile,
-		LogFile:     DefaultLogFile,
+	return &Config{
+		Region:        region,
+		AWSProfile:    os.Getenv("AWS_PROFILE"),
+		Client:        DefaultHostnameShort(),
+		DefaultTier:   "Bulk",
+		OpenSSLBin:    DefaultOpenSSLBin,
+		DumpDatesFile: DefaultDumpDatesPath,
+		ConfigDir:     DefaultConfigDir,
+		DBDir:         DefaultDBDir,
+		LockFile:      DefaultLockFile,
+		LogFile:       DefaultLogFile,
 	}
-	return cfg
 }
 
-// Clone returns a deep copy of Config for safe editing inside the TUI.
+// Clone returns a copy of Config for safe editing inside the TUI.
 func (c *Config) Clone() *Config {
 	if c == nil {
 		return DefaultConfig()
@@ -120,7 +118,7 @@ func (c *Config) Clone() *Config {
 	return &cp
 }
 
-// Normalize fills missing fields with system defaults.
+// Normalize fills missing fields with system defaults without clobbering explicit settings.
 func (c *Config) Normalize() {
 	if strings.TrimSpace(c.Region) == "" {
 		if env := os.Getenv("AWS_REGION"); env != "" {
@@ -146,6 +144,9 @@ func (c *Config) Normalize() {
 	}
 	if strings.TrimSpace(c.LogFile) == "" {
 		c.LogFile = DefaultLogFile
+	}
+	if strings.TrimSpace(c.DumpDatesFile) == "" {
+		c.DumpDatesFile = DefaultDumpDatesPath
 	}
 }
 
@@ -191,6 +192,13 @@ func (c *Config) EffectiveLogFile() string {
 	return c.LogFile
 }
 
+func (c *Config) EffectiveDumpDatesPath() string {
+	if c != nil && strings.TrimSpace(c.DumpDatesFile) != "" {
+		return strings.TrimSpace(c.DumpDatesFile)
+	}
+	return DefaultDumpDatesPath
+}
+
 func (c *Config) EffectiveTier(override string) string {
 	if strings.TrimSpace(override) != "" {
 		return NormalizeTier(override)
@@ -223,6 +231,9 @@ func (c *Config) ApplyCLI(opts CLIOptions) {
 	if strings.TrimSpace(opts.KeyPath) != "" {
 		c.KeyPath = strings.TrimSpace(opts.KeyPath)
 	}
+	if strings.TrimSpace(opts.OpenSSLBin) != "" {
+		c.OpenSSLBin = strings.TrimSpace(opts.OpenSSLBin)
+	}
 	if strings.TrimSpace(opts.Tier) != "" {
 		c.DefaultTier = NormalizeTier(opts.Tier)
 	}
@@ -243,6 +254,29 @@ func (c *Config) ValidateS3() error {
 	return nil
 }
 
+// applyLDLibraryPath prepends ldPath onto LD_LIBRARY_PATH in a child process environment slice.
+func applyLDLibraryPath(baseEnv []string, ldPath string) []string {
+	ldPath = strings.TrimSpace(ldPath)
+	if ldPath == "" {
+		return baseEnv
+	}
+	out := make([]string, 0, len(baseEnv)+1)
+	var existing string
+	for _, kv := range baseEnv {
+		if strings.HasPrefix(kv, "LD_LIBRARY_PATH=") {
+			existing = strings.TrimPrefix(kv, "LD_LIBRARY_PATH=")
+			continue
+		}
+		out = append(out, kv)
+	}
+	if existing != "" {
+		out = append(out, "LD_LIBRARY_PATH="+ldPath+":"+existing)
+	} else {
+		out = append(out, "LD_LIBRARY_PATH="+ldPath)
+	}
+	return out
+}
+
 // EnsureDirs creates required configuration, cache, and job directories with 0700 permissions.
 func EnsureDirs(cfg *Config) error {
 	dirs := []string{
@@ -259,7 +293,7 @@ func EnsureDirs(cfg *Config) error {
 	return nil
 }
 
-// LoadConfig loads /etc/tardis.d/config.json if present, returning defaults if absent.
+// LoadConfig loads /etc/tardis.d/config.json if present, returning OS defaults if absent.
 func LoadConfig(path string) (*Config, error) {
 	if strings.TrimSpace(path) == "" {
 		path = DefaultConfigFile
@@ -395,15 +429,16 @@ func (l *FileLock) Release() error {
 	return err
 }
 
-// MountInfo represents a mounted OpenBSD filesystem parsed from `mount -v`.
+// MountInfo represents a mounted filesystem on OpenBSD or Linux.
 type MountInfo struct {
-	MountPoint string
-	Device     string // e.g. /dev/sd0a
-	RawDevice  string // e.g. /dev/rsd0a
-	DUID       string // e.g. 71e3bf1383a27a44.a
-	FSType     string // e.g. ffs
-	Options    string
-	DevID      int64
+	MountPoint      string
+	Device          string // e.g. /dev/sd0a or /dev/mapper/vg0-root
+	CanonicalDevice string // symlink-resolved block device (e.g. /dev/dm-0)
+	RawDevice       string // OpenBSD raw character device (e.g. /dev/rsd0a)
+	DUID            string // OpenBSD disklabel DUID or Linux filesystem UUID
+	FSType          string // ffs, ext2, ext3, ext4, xfs, etc.
+	Options         string
+	DevID           uint64
 }
 
 func deriveRawDevice(dev string) string {
@@ -413,82 +448,31 @@ func deriveRawDevice(dev string) string {
 	return dev
 }
 
-// MatchesDumpIdent reports whether an /etc/dumpdates device/DUID column matches this mount.
+// MatchesDumpIdent reports whether a dumpdates device/DUID/UUID/LVM identifier matches this mount.
 func (m MountInfo) MatchesDumpIdent(ident string) bool {
 	ident = strings.TrimSpace(ident)
 	if ident == "" {
 		return false
 	}
-	if ident == m.Device || ident == m.RawDevice || (m.DUID != "" && ident == m.DUID) {
+	if ident == m.Device || ident == m.CanonicalDevice || ident == m.RawDevice || ident == m.MountPoint {
+		return true
+	}
+	if m.DUID != "" && (ident == m.DUID || strings.TrimPrefix(ident, "UUID=") == m.DUID) {
 		return true
 	}
 	if deriveRawDevice(ident) == m.RawDevice && m.RawDevice != "" {
 		return true
 	}
+	if strings.HasPrefix(ident, "/dev/") && m.CanonicalDevice != "" {
+		if resolved, err := filepath.EvalSymlinks(ident); err == nil && resolved == m.CanonicalDevice {
+			return true
+		}
+	}
 	return false
 }
 
-// ListMounts parses OpenBSD `/sbin/mount -v` output and populates st_dev IDs.
-func ListMounts() ([]MountInfo, error) {
-	out, err := exec.Command(MountBin, "-v").Output()
-	if err != nil {
-		return nil, fmt.Errorf("execute %s -v: %w", MountBin, err)
-	}
-	var mounts []MountInfo
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		idxOn := strings.Index(line, " on ")
-		if idxOn == -1 {
-			continue
-		}
-		left := strings.TrimSpace(line[:idxOn])
-		right := line[idxOn+4:]
-		idxType := strings.LastIndex(right, " type ")
-		if idxType == -1 {
-			continue
-		}
-		mntPoint := filepath.Clean(strings.TrimSpace(right[:idxType]))
-		rest := strings.TrimSpace(right[idxType+6:])
-
-		fsType := rest
-		opts := ""
-		if idxParen := strings.Index(rest, " ("); idxParen != -1 && strings.HasSuffix(rest, ")") {
-			fsType = strings.TrimSpace(rest[:idxParen])
-			opts = rest[idxParen+2 : len(rest)-1]
-		}
-
-		dev := left
-		duid := ""
-		if idxParen := strings.Index(left, " ("); idxParen != -1 && strings.HasSuffix(left, ")") {
-			dev = strings.TrimSpace(left[:idxParen])
-			duid = strings.TrimSpace(left[idxParen+2 : len(left)-1])
-		}
-
-		info := MountInfo{
-			MountPoint: mntPoint,
-			Device:     dev,
-			RawDevice:  deriveRawDevice(dev),
-			DUID:       duid,
-			FSType:     fsType,
-			Options:    opts,
-		}
-		var st unix.Stat_t
-		if err := unix.Stat(mntPoint, &st); err == nil {
-			info.DevID = int64(st.Dev)
-		}
-		mounts = append(mounts, info)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return mounts, nil
-}
-
-// ResolveMount locates an active OpenBSD mountpoint by path.
+// ResolveMount locates an active mountpoint by path. If multiple entries share the same mountpoint
+// (such as Linux rootfs + real block mount), the last (topmost) mount table entry wins.
 func ResolveMount(mountPoint string) (*MountInfo, error) {
 	if strings.TrimSpace(mountPoint) == "" {
 		return nil, errors.New("mountpoint (-m) is empty")
@@ -498,25 +482,57 @@ func ResolveMount(mountPoint string) (*MountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	var matched *MountInfo
 	for i := range mounts {
 		if mounts[i].MountPoint == clean {
-			return &mounts[i], nil
+			matched = &mounts[i]
 		}
+	}
+	if matched != nil {
+		return matched, nil
 	}
 	return nil, fmt.Errorf("%s: not mounted", clean)
 }
 
-// DumpDateEntry represents a single record in OpenBSD /etc/dumpdates.
+// DumpDateEntry represents a single record in /etc/dumpdates or /var/lib/dumpdates.
 type DumpDateEntry struct {
 	Ident string
 	Level int
 	Time  time.Time
 }
 
-// ReadDumpDates parses /etc/dumpdates entries using local ctime(3) timestamps.
+func parseDumpDateTimestamp(fields []string) (time.Time, bool) {
+	// 5 tokens: "Mon Jan 2 15:04:05 2006"
+	if len(fields) >= 5 {
+		s5 := strings.Join(fields[:5], " ")
+		if ts, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", s5, time.Local); err == nil {
+			// Check if 6th token is a numeric timezone offset like "+0800" or "+1000" (Linux e2fsprogs dump)
+			if len(fields) >= 6 {
+				s6 := strings.Join(fields[:6], " ")
+				if tsTZ, errTZ := time.Parse("Mon Jan 2 15:04:05 2006 -0700", s6); errTZ == nil {
+					return tsTZ.Local(), true
+				}
+				if tsMST, errMST := time.ParseInLocation("Mon Jan 2 15:04:05 2006 MST", s6, time.Local); errMST == nil {
+					return tsMST, true
+				}
+			}
+			return ts, true
+		}
+	}
+	// 6 tokens with TZ before year: "Mon Jan 2 15:04:05 MST 2006"
+	if len(fields) >= 6 {
+		s6 := strings.Join(fields[:6], " ")
+		if ts, err := time.ParseInLocation("Mon Jan 2 15:04:05 MST 2006", s6, time.Local); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// ReadDumpDates parses BSD and Linux dumpdates entries.
 func ReadDumpDates(path string) ([]DumpDateEntry, error) {
 	if strings.TrimSpace(path) == "" {
-		path = DumpDatesPath
+		path = DefaultDumpDatesPath
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -540,31 +556,64 @@ func ReadDumpDates(path string) ([]DumpDateEntry, error) {
 		if err != nil {
 			continue
 		}
-		tsStr := strings.Join(fields[2:7], " ")
-		ts, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", tsStr, time.Local)
-		if err != nil && len(fields) >= 8 {
-			tsStrTZ := strings.Join(fields[2:8], " ")
-			ts, err = time.ParseInLocation("Mon Jan 2 15:04:05 MST 2006", tsStrTZ, time.Local)
+		if ts, ok := parseDumpDateTimestamp(fields[2:]); ok {
+			entries = append(entries, DumpDateEntry{
+				Ident: fields[0],
+				Level: lvl,
+				Time:  ts,
+			})
 		}
-		if err != nil {
-			continue
-		}
-		entries = append(entries, DumpDateEntry{
-			Ident: fields[0],
-			Level: lvl,
-			Time:  ts,
-		})
 	}
 	return entries, scanner.Err()
 }
 
+// UpdateDumpDate records a completed dump timestamp for drivers (such as Linux xfsdump)
+// that maintain their own binary inventory rather than writing dumpdates directly.
+func UpdateDumpDate(path string, mnt *MountInfo, level int, ts time.Time) error {
+	if mnt == nil {
+		return nil
+	}
+	if strings.TrimSpace(path) == "" {
+		path = DefaultDumpDatesPath
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	ident := mnt.CanonicalDevice
+	if ident == "" {
+		ident = mnt.Device
+	}
+
+	var keptLines []string
+	if raw, err := os.ReadFile(path); err == nil {
+		sc := bufio.NewScanner(strings.NewReader(string(raw)))
+		for sc.Scan() {
+			line := sc.Text()
+			fields := strings.Fields(line)
+			if len(fields) >= 7 {
+				if lvl, lErr := strconv.Atoi(fields[1]); lErr == nil && lvl == level && mnt.MatchesDumpIdent(fields[0]) {
+					continue
+				}
+			}
+			if strings.TrimSpace(line) != "" {
+				keptLines = append(keptLines, line)
+			}
+		}
+	}
+
+	newLine := fmt.Sprintf("%-16s %d %s", ident, level, ts.Local().Format("Mon Jan _2 15:04:05 2006 -0700"))
+	keptLines = append(keptLines, newLine)
+	content := strings.Join(keptLines, "\n") + "\n"
+	return os.WriteFile(path, []byte(content), 0664)
+}
+
 // ReferenceDumpTime implements dump(8)'s incremental rule: for level N > 0,
 // find the most recent dump timestamp for this filesystem whose level < N.
-func ReferenceDumpTime(mnt *MountInfo, dumpLevel int) (time.Time, bool, error) {
+func ReferenceDumpTime(dumpDatesPath string, mnt *MountInfo, dumpLevel int) (time.Time, bool, error) {
 	if dumpLevel <= 0 {
 		return time.Time{}, false, nil
 	}
-	entries, err := ReadDumpDates(DumpDatesPath)
+	entries, err := ReadDumpDates(dumpDatesPath)
 	if err != nil {
 		return time.Time{}, false, err
 	}
@@ -582,13 +631,13 @@ func ReferenceDumpTime(mnt *MountInfo, dumpLevel int) (time.Time, bool, error) {
 }
 
 // ScanMountChanges walks mnt.MountPoint without crossing filesystem boundaries (-xdev),
-// checking both mtime and ctime against since to match OpenBSD /sbin/dump semantics.
+// checking both mtime and ctime against since to match dump(8)/xfsdump(8) incremental semantics.
 func ScanMountChanges(mnt *MountInfo, since time.Time, fullDump bool) (bool, int64, error) {
 	var rootStat unix.Stat_t
 	if err := unix.Lstat(mnt.MountPoint, &rootStat); err != nil {
 		return false, 0, fmt.Errorf("lstat %s: %w", mnt.MountPoint, err)
 	}
-	devID := int64(rootStat.Dev)
+	devID := uint64(rootStat.Dev)
 	changed := fullDump
 	var totalBytes int64
 
@@ -608,7 +657,7 @@ func ScanMountChanges(mnt *MountInfo, since time.Time, fullDump bool) (bool, int
 		}
 
 		for _, name := range names {
-			if strings.HasPrefix(name, ".tardis_stage_") {
+			if strings.HasPrefix(name, ".tardis_stage_") || strings.HasPrefix(name, "xfsrestorehousekeeping") {
 				continue
 			}
 			fullPath := filepath.Join(dir, name)
@@ -616,7 +665,7 @@ func ScanMountChanges(mnt *MountInfo, since time.Time, fullDump bool) (bool, int
 			if err := unix.Lstat(fullPath, &st); err != nil {
 				continue
 			}
-			if int64(st.Dev) != devID {
+			if uint64(st.Dev) != devID {
 				continue
 			}
 
@@ -625,11 +674,11 @@ func ScanMountChanges(mnt *MountInfo, since time.Time, fullDump bool) (bool, int
 			entryChanged := fullDump || since.IsZero() || mtime.After(since) || ctime.After(since)
 			if entryChanged {
 				changed = true
-				if (st.Mode & unix.S_IFMT) == unix.S_IFREG {
-					totalBytes += st.Size
+				if (uint32(st.Mode) & unix.S_IFMT) == unix.S_IFREG {
+					totalBytes += int64(st.Size)
 				}
 			}
-			if (st.Mode & unix.S_IFMT) == unix.S_IFDIR {
+			if (uint32(st.Mode) & unix.S_IFMT) == unix.S_IFDIR {
 				if err := walkDir(fullPath); err != nil {
 					return err
 				}
@@ -703,7 +752,6 @@ func ParseArchiveBase(expectedClient, keyOrName string, knownMounts []MountInfo)
 		}
 	}
 
-	// "2006-01-02_15:04:05_" is 20 bytes
 	if len(s) < 23 || s[19] != '_' {
 		return ArchiveMeta{}, false
 	}
@@ -722,7 +770,7 @@ func ParseArchiveBase(expectedClient, keyOrName string, knownMounts []MountInfo)
 		return ArchiveMeta{}, false
 	}
 
-	mid := rem[:lastUS] // "<client><mountSlug>"
+	mid := rem[:lastUS]
 	client := expectedClient
 	if prefixClient != "" && !strings.Contains(prefixClient, "/") {
 		client = prefixClient

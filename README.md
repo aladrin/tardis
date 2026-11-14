@@ -46,8 +46,12 @@ sudo apk add openssl dump xfsdump
 ## 2. Building from Source
 
 ### Build Requirements
-- **Go 1.22 or newer** (`doas pkg_add go` on OpenBSD, or distribution Go / official tarball on Linux)
+- **Go 1.22 or newer**
 - **Git**
+
+```sh
+doas pkg_add go git
+```
 
 ### Native Build (OpenBSD or Linux)
 
@@ -114,7 +118,7 @@ sudo install -d -o root -g root -m 0700 /etc/kerr.d /var/db/kerr /var/db/kerr/jo
 On Linux, Kerr works immediately with your distribution's `/usr/bin/openssl` (OpenSSL 1.1.1 / 3.x). If you prefer LibreSSL on Linux—for example, to maintain 100% cipher compatibility with OpenBSD hosts—compile LibreSSL into `/opt/kerr`:
 
 ```sh
-LIBRESSL_VER="4.0.0"
+LIBRESSL_VER="4.4.0"
 curl -LO "[https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/libressl-$](https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/libressl-$){LIBRESSL_VER}.tar.gz"
 tar xzf "libressl-${LIBRESSL_VER}.tar.gz"
 cd "libressl-${LIBRESSL_VER}"
@@ -205,8 +209,8 @@ Create `/etc/kerr.d/config.json` (`0600`):
   "aws_profile": "",
   "access_key_id": "AKIA...",
   "secret_access_key": "YOUR_SECRET_ACCESS_KEY",
-  "client": "nettle",
-  "key_path": "/etc/kerr.d/nettle.key",
+  "client": "myhost",
+  "key_path": "/etc/kerr.d/myhost.key",
   "default_tier": "Bulk",
   "openssl_bin": "",
   "ld_library_path": ""
@@ -238,13 +242,13 @@ Example output on **Linux**:
 
 ```text
 platform   : Linux (dumpdates=/var/lib/dumpdates)
-crypto     : PASS — OpenSSL 3.0.15 3 Sep 2024 (/usr/bin/openssl, -chacha20 + PBKDF2-100k + HMAC-SHA256)
-keyfile    : /etc/kerr.d/nettle.key [verified, id=4d91bc07a213]
+crypto     : PASS — OpenSSL 3.5.9 29 Sep 2026 (/usr/bin/openssl, -chacha20 + PBKDF2-100k + HMAC-SHA256)
+keyfile    : /etc/kerr.d/myhost.key [verified, id=4d91bc07a213]
 ext dump   : READY — /usr/sbin/dump
 ext restore: READY — /usr/sbin/restore
 xfsdump    : READY — /usr/sbin/xfsdump
 xfsrestore : READY — /usr/sbin/xfsrestore
-s3         : PASS — s3://your-kerr-backup-bucket/nettle/ reachable (ap-southeast-2)
+s3         : PASS — s3://your-kerr-backup-bucket/myhost/ reachable (ap-southeast-2)
 ```
 
 **CRITICAL — OFFLINE KEY BACKUP:** Copy `/etc/kerr.d/{client}.key` to secure offline storage (such as an encrypted vault or hardware token). Without this 128-character hex keyfile, archives in S3 cannot be decrypted or authenticated.
@@ -325,10 +329,10 @@ kerr -O /opt/kerr/bin/openssl -S
 kerr -q ALL
 
 # Restore a full archive to an alternate directory (auto-detects restore vs xfsrestore)
-kerr -m /srv/xfsdata -r 2026-11-14_02:30:00_nettle_srv_xfsdata_0.zst.dat -t Standard -o /srv/xfsdata/restore_test
+kerr -m /srv/xfsdata -r 2026-11-14_02:30:00_myhost_srv_xfsdata_0.zst.dat -t Standard -o /srv/xfsdata/restore_test
 
 # Delete an obsolete snapshot bundle (archive, catalog, and both .hmac files)
-kerr -D 2026-11-14_02:30:00_nettle_srv_xfsdata_0
+kerr -D 2026-11-14_02:30:00_myhost_srv_xfsdata_0
 ```
 
 ---
@@ -340,8 +344,8 @@ Every archive can be manually authenticated and extracted using standard OS util
 ### Step 1: Verify Domain-Bound `HMAC-SHA256` Before Touching Disk
 
 ```sh
-CLIENT="nettle"
-ARCHIVE="2026-11-14_02:30:00_nettle_home_0.zst.dat"
+CLIENT="myhost"
+ARCHIVE="2026-11-14_02:30:00_myhost_home_0.zst.dat"
 S3_OBJ_KEY="${CLIENT}/${ARCHIVE}"
 KEYFILE="/etc/kerr.d/${CLIENT}.key"
 

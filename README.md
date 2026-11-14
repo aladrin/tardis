@@ -1,3 +1,4 @@
+![kerr](screenshot.png)
 # Kerr (OpenBSD & Linux)
 
 Kerr is a single-binary, zero-CGO backup and selective restore utility for **OpenBSD** and **Linux** (named in honour of physicist Roy Kerr). It streams native filesystem dumps through pure-Go `zstd`, `ChaCha20` (`PBKDF2-HMAC-SHA256`, 100,000 iterations), and domain-bound `HMAC-SHA256` directly to Amazon S3 `DEEP_ARCHIVE`, while maintaining fast, authenticated file catalogs in S3 `STANDARD` for interactive terminal browsing and point-in-time recovery.

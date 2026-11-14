@@ -1,7 +1,28 @@
 ![kerr](screenshot.png)
 # Kerr (OpenBSD & Linux)
 
-Kerr is a single-binary, zero-CGO backup and selective restore utility for **OpenBSD** and **Linux** (named in honour of physicist Roy Kerr). It streams native filesystem dumps through pure-Go `zstd`, `ChaCha20` (`PBKDF2-HMAC-SHA256`, 100,000 iterations), and domain-bound `HMAC-SHA256` directly to Amazon S3 `DEEP_ARCHIVE`, while maintaining fast, authenticated file catalogs in S3 `STANDARD` for interactive terminal browsing and point-in-time recovery.
+**Kerr** is a single-binary, zero-CGO command-line utility and interactive terminal/ncurses UI designed for incremental backups and selective restores on **OpenBSD** and **Linux** systems. Named in honour of physicist Roy Kerr, it streams native filesystem dumps directly to Amazon S3 `DEEP_ARCHIVE` while maintaining fast, encrypted file catalogs in S3 `STANDARD` for interactive browsing and point-in-time recovery.
+
+### Key Architecture & Features
+
+- **Security First:** Applies end-to-end encryption using pure-Go `zstd`, `ChaCha20` (via `PBKDF2-HMAC-SHA256` with 100,000 iterations), and domain-bound `HMAC-SHA256` authentication records. Everything is encrypted and authenticated before reaching S3 targets.
+- **Storage Efficiency:** Uploads large, encrypted filesystem dumps directly to low-cost S3 Glacier `DEEP_ARCHIVE` tiers while concurrently storing small, encrypted JSONL file/inode catalogs in S3 `STANDARD` for instant terminal browsing and point-in-time recovery.
+- **Native Tool Integration:** Relies on time-tested OS native dump drivers rather than reinventing filesystem traversal:
+  - **OpenBSD:** Backs up `ffs` partitions via base `/sbin/dump` and `/sbin/restore`.
+  - **Linux:** Backs up `ext2`/`ext3`/`ext4` partitions via standard `dump`/`restore` and `xfs` partitions via `xfsdump`/`xfsrestore`.
+- **Zero Dependencies:** Compiles as a completely static binary (`CGO_ENABLED=0`), requiring no external shared libraries or CGO to operate and enabling clean cross-compilation between Linux and OpenBSD.
+
+### Terminal Interface Layout
+
+The interactive terminal UI is organized into four main views:
+1. **Dump Timeline:** View and manage historical snapshot chains across mountpoints and client hosts.
+2. **Snapshot Browser:** Interactively browse directory trees, compare file versions across dates, and mark individual files or folders for restore.
+3. **Jobs & Glacier Monitor:** Track and execute queued restore jobs as cloud archives thaw from deep archive storage.
+4. **S3 & System Config:** Configure AWS credentials, target buckets, keyfiles, and run live cryptographic and S3 connectivity self-tests.
+
+### Emergency Recovery
+
+Because Kerr wraps standard OS streams and ciphers, you do not need the `kerr` binary to salvage data during a bare-metal disaster—archives can be manually authenticated, decrypted, and extracted using generic `openssl`, `zstd`, and `restore`/`xfsrestore` commands (see Section 9).
 
 ---
 
@@ -232,7 +253,7 @@ Example output on **OpenBSD**:
 
 ```text
 platform   : OpenBSD (dumpdates=/etc/dumpdates)
-crypto     : PASS — LibreSSL 4.0.0 (/usr/bin/openssl, -chacha + PBKDF2-100k + HMAC-SHA256)
+crypto     : PASS — LibreSSL 4.4.0 (/usr/bin/openssl, -chacha + PBKDF2-100k + HMAC-SHA256)
 keyfile    : /etc/kerr.d/ibex.key [generated (0400), id=8f2a1c90e4b1]
 ffs dump   : READY — /sbin/dump
 ffs restore: READY — /sbin/restore

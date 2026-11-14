@@ -17,11 +17,11 @@ import (
 )
 
 const (
-	DefaultConfigDir  = "/etc/tardis.d"
-	DefaultConfigFile = "/etc/tardis.d/config.json"
-	DefaultDBDir      = "/var/db/tardis"
-	DefaultLockFile   = "/var/run/tardis.lock"
-	DefaultLogFile    = "/var/log/tardis"
+	DefaultConfigDir  = "/etc/kerr.d"
+	DefaultConfigFile = "/etc/kerr.d/config.json"
+	DefaultDBDir      = "/var/db/kerr"
+	DefaultLockFile   = "/var/run/kerr.lock"
+	DefaultLogFile    = "/var/log/kerr"
 
 	ArchiveTimeLayout = "2006-01-02_15:04:05"
 )
@@ -293,7 +293,7 @@ func EnsureDirs(cfg *Config) error {
 	return nil
 }
 
-// LoadConfig loads /etc/tardis.d/config.json if present, returning OS defaults if absent.
+// LoadConfig loads /etc/kerr.d/config.json if present, returning OS defaults if absent.
 func LoadConfig(path string) (*Config, error) {
 	if strings.TrimSpace(path) == "" {
 		path = DefaultConfigFile
@@ -364,7 +364,7 @@ func SaveConfig(path string, cfg *Config) error {
 	return nil
 }
 
-// Logf appends a timestamped line to /var/log/tardis on a best-effort basis.
+// Logf appends a timestamped line to /var/log/kerr on a best-effort basis.
 func Logf(cfg *Config, format string, args ...any) {
 	logPath := DefaultLogFile
 	if cfg != nil {
@@ -377,7 +377,7 @@ func Logf(cfg *Config, format string, args ...any) {
 	}
 	defer f.Close()
 	msg := fmt.Sprintf(format, args...)
-	_, _ = fmt.Fprintf(f, "%s tardis[%d]: %s\n", time.Now().Format(time.RFC3339), os.Getpid(), msg)
+	_, _ = fmt.Fprintf(f, "%s kerr[%d]: %s\n", time.Now().Format(time.RFC3339), os.Getpid(), msg)
 }
 
 // FileLock wraps an exclusive non-blocking flock(2) handle.
@@ -405,9 +405,9 @@ func AcquireLock(lockPath string) (*FileLock, error) {
 		holder := strings.TrimSpace(string(buf[:n]))
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 			if holder != "" {
-				return nil, fmt.Errorf("tardis: already running (pid %s)", holder)
+				return nil, fmt.Errorf("kerr: already running (pid %s)", holder)
 			}
-			return nil, errors.New("tardis: already running")
+			return nil, errors.New("kerr: already running")
 		}
 		return nil, fmt.Errorf("flock %s: %w", lockPath, err)
 	}
@@ -657,7 +657,7 @@ func ScanMountChanges(mnt *MountInfo, since time.Time, fullDump bool) (bool, int
 		}
 
 		for _, name := range names {
-			if strings.HasPrefix(name, ".tardis_stage_") || strings.HasPrefix(name, "xfsrestorehousekeeping") {
+			if strings.HasPrefix(name, ".kerr_stage_") || strings.HasPrefix(name, "xfsrestorehousekeeping") {
 				continue
 			}
 			fullPath := filepath.Join(dir, name)

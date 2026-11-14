@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	TardisDomainTag  = "TARDIS-V2\x00"
-	TardisKeyIDTag   = "TARDIS-KEY-ID\x00"
+	KerrDomainTag    = "KERR-V2\x00"
+	KerrKeyIDTag     = "KERR-KEY-ID\x00"
 	PBKDF2Iterations = "100000"
 	KeyHexTotalLen   = 128 // 64 hex chars (256-bit enc secret) + 64 hex chars (256-bit MAC key)
 )
@@ -66,7 +66,7 @@ func (k *KeyMaterial) Fingerprint() string {
 		return "unloaded"
 	}
 	mac := hmac.New(sha256.New, k.MACKey)
-	_, _ = mac.Write([]byte(TardisKeyIDTag))
+	_, _ = mac.Write([]byte(KerrKeyIDTag))
 	sum := mac.Sum(nil)
 	return hex.EncodeToString(sum[:6])
 }
@@ -80,7 +80,7 @@ func (k *KeyMaterial) Wipe() {
 	clear(k.MACKey)
 }
 
-// LoadKey reads and validates an existing 0400/0600-restricted Tardis keyfile without following symlinks.
+// LoadKey reads and validates an existing 0400/0600-restricted Kerr keyfile without following symlinks.
 func LoadKey(path string) (*KeyMaterial, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("key path is empty")
@@ -208,7 +208,7 @@ func LoadOrCreateKey(path string) (*KeyMaterial, error) {
 // NewObjectMAC initializes a domain-separated HMAC-SHA256 bound to a specific S3 object key.
 func NewObjectMAC(macKey []byte, objectKey string) hash.Hash {
 	mac := hmac.New(sha256.New, macKey)
-	_, _ = mac.Write([]byte(TardisDomainTag))
+	_, _ = mac.Write([]byte(KerrDomainTag))
 	_, _ = mac.Write([]byte(objectKey))
 	_, _ = mac.Write([]byte{0})
 	return mac
@@ -530,7 +530,7 @@ func (d *DecryptStream) completeAndVerify(allowEarlyPipeClose bool) error {
 		waitErr := d.cmd.Wait()
 		if waitErr != nil && !allowEarlyPipeClose {
 			d.finishErr = fmt.Errorf("%s decrypt failed (%s): %w (%s)",
-				d.provider, d.objectKey, strings.TrimSpace(d.stderr.String()))
+				d.provider, d.objectKey, waitErr, strings.TrimSpace(d.stderr.String()))
 			return
 		}
 		// Drain any unread tail so full-object HMAC-SHA256 is verified even when selective restore exits early.
@@ -628,7 +628,7 @@ func SelfTestSSL(ctx context.Context, cfg *Config, km *KeyMaterial) (*SSLRuntime
 	if err != nil {
 		return nil, err
 	}
-	probe := []byte("tardis-crypto-selftest-probe")
+	probe := []byte("kerr-crypto-selftest-probe")
 	const testKey = "_selftest/probe.dat"
 
 	cipher, hmacRec, err := EncryptAndSignBytes(ctx, rt, km, testKey, probe)

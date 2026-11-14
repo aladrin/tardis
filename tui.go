@@ -258,7 +258,7 @@ func startTTYReader(tty *os.File, out chan<- tuiEvent, stop <-chan struct{}) {
 	}()
 }
 
-// RunTUI launches the 4-view bstat-inspired Tardis console on OpenBSD or Linux.
+// RunTUI launches the 4-view bstat-inspired Kerr console on OpenBSD or Linux.
 func RunTUI(ctx context.Context, eng *Engine) error {
 	tty, origTerm, err := openRawTTY()
 	if err != nil {
@@ -1219,7 +1219,7 @@ func (s *tuiState) activateSettingRow(idx int) {
 		7:  {"Client Identifier", s.cfgDraft.EffectiveClient()},
 		8:  {"Master Keyfile Path (0400)", s.cfgDraft.EffectiveKeyPath()},
 		9:  {"SSL Binary Path (blank = OS auto-detect)", s.cfgDraft.OpenSSLBin},
-		10: {"SSL LD_LIBRARY_PATH (Linux custom prefix, e.g. /opt/tardis/lib)", s.cfgDraft.LDLibraryPath},
+		10: {"SSL LD_LIBRARY_PATH (Linux custom prefix, e.g. /opt/kerr/lib)", s.cfgDraft.LDLibraryPath},
 	}
 	if p, ok := prompts[idx]; ok {
 		s.promptMode, s.promptTitle, s.promptBuf = promptEditSetting, p[0], p[1]

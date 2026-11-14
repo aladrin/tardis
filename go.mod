@@ -1,4 +1,4 @@
-module tardis
+module kerr
 
 go 1.22
 

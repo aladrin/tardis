@@ -51,7 +51,7 @@ func ResolveSSLRuntime(cfg *Config) (*SSLRuntime, error) {
 	ver := strings.TrimSpace(string(out))
 	fields := strings.Fields(ver)
 	if len(fields) == 0 || fields[0] != "LibreSSL" {
-		return nil, fmt.Errorf("tardis: OpenBSD requires LibreSSL, got %q", ver)
+		return nil, fmt.Errorf("kerr: OpenBSD requires LibreSSL, got %q", ver)
 	}
 	return &SSLRuntime{
 		Binary:        bin,
@@ -184,7 +184,7 @@ func BuildRestoreCmd(ctx context.Context, magicHeader []byte, stageDir string, _
 	return cmd, nil
 }
 
-// ProbeHostTools reports OpenBSD backup binaries for `tardis -S`.
+// ProbeHostTools reports OpenBSD backup binaries for `kerr -S`.
 func ProbeHostTools() []string {
 	var lines []string
 	for _, item := range [][2]string{

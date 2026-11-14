@@ -523,7 +523,7 @@ type Engine struct {
 	execMu     sync.Mutex // Serializes local staging/extraction executions
 }
 
-// NewEngine initializes the core Tardis engine.
+// NewEngine initializes the core Kerr engine.
 func NewEngine(cfg *Config, configPath string) *Engine {
 	if cfg == nil {
 		cfg = DefaultConfig()
@@ -711,7 +711,7 @@ func parseRestoreTVOutput(r io.Reader, mountPoint string, countAtomic *atomic.In
 			if rawPath != "" && rawPath != "." {
 				rel := strings.TrimPrefix(rawPath, "./")
 				rel = strings.TrimLeft(rel, "/")
-				if rel != "" && !strings.HasPrefix(rel, ".tardis_stage_") {
+				if rel != "" && !strings.HasPrefix(rel, ".kerr_stage_") {
 					if _, dup := seen[rel]; !dup {
 						seen[rel] = struct{}{}
 						ent := parseStatToCatalogEntry(mountPoint, rel, recType, ino)
@@ -792,7 +792,7 @@ func writeAtomic0600(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".tmp.tardis.*")
+	tmp, err := os.CreateTemp(dir, ".tmp.kerr.*")
 	if err != nil {
 		return err
 	}
@@ -1269,7 +1269,7 @@ func (e *Engine) saveJobLocked(job *RestoreJob) error {
 	return writeAtomic0600(path, payload)
 }
 
-// LoadJobs loads persisted RestoreJob records from `/var/db/tardis/jobs/*.json`.
+// LoadJobs loads persisted RestoreJob records from `/var/db/kerr/jobs/*.json`.
 func (e *Engine) LoadJobs() error {
 	cfg := e.ConfigSnapshot()
 	if err := EnsureDirs(cfg); err != nil {
@@ -1344,8 +1344,8 @@ func (e *Engine) EnqueueRestoreJob(
 	if cleanMount == "" || cleanMount == "." {
 		cleanMount = archive.MountGuess
 	}
-	if mode != RestoreModeNewPath {
-		mode = RestoreModeOverwrite
+	if mode != RestoreModeOverwrite {
+		mode = RestoreModeNewPath
 	}
 	if mode == RestoreModeNewPath && strings.TrimSpace(targetDest) == "" {
 		return nil, errors.New("NEW_PATH restore mode requires a non-empty target filename/path/suffix")
@@ -1379,7 +1379,7 @@ func (e *Engine) EnqueueRestoreJob(
 	return &cp, nil
 }
 
-// DeleteJob removes a non-running job record from memory and `/var/db/tardis/jobs/`.
+// DeleteJob removes a non-running job record from memory and `/var/db/kerr/jobs/`.
 func (e *Engine) DeleteJob(id string) error {
 	cfg := e.ConfigSnapshot()
 	e.jobMu.Lock()
@@ -1562,7 +1562,7 @@ func copySingleFileCrossFS(src, dst string, st *unix.Stat_t) error {
 		}
 		defer in.Close()
 
-		tmpDst := fmt.Sprintf("%s.tardis_tmp_%d", dst, os.Getpid())
+		tmpDst := fmt.Sprintf("%s.kerr_tmp_%d", dst, os.Getpid())
 		out, err := os.OpenFile(tmpDst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(rawMode&0777))
 		if err != nil {
 			return err
@@ -1755,7 +1755,7 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 	lock, err := AcquireLock(cfg.EffectiveLockFile())
 	if err != nil {
 		snap := e.updateJob(id, true, func(j *RestoreJob) {
-			j.Message = "Waiting for active local tardis lock (" + err.Error() + ")"
+			j.Message = "Waiting for active local kerr lock (" + err.Error() + ")"
 		})
 		notify(snap)
 		return err
@@ -1817,7 +1817,7 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 		return mErr
 	}
 
-	stageDir := filepath.Join(jobSnap.MountPoint, ".tardis_stage_"+jobSnap.ID)
+	stageDir := filepath.Join(jobSnap.MountPoint, ".kerr_stage_"+jobSnap.ID)
 	_ = os.RemoveAll(stageDir)
 	if err := os.MkdirAll(stageDir, 0700); err != nil {
 		snap := e.updateJob(id, true, func(j *RestoreJob) {
@@ -2071,7 +2071,7 @@ func (e *Engine) stepJob(ctx context.Context, id string, onProgress func(Restore
 	return nil
 }
 
-// RunCLIRestore executes a CLI restore (`tardis -r <archive> -m <mount> [-t Standard|Bulk] [-o <dest>]`),
+// RunCLIRestore executes a CLI restore (`kerr -r <archive> -m <mount> [-t Standard|Bulk] [-o <dest>]`),
 // polling Glacier Deep Archive thaw progress automatically if frozen.
 func (e *Engine) RunCLIRestore(
 	ctx context.Context,

@@ -23,7 +23,7 @@ const (
 	PlatformName         = "Linux"
 	DefaultDumpDatesPath = "/var/lib/dumpdates"
 	DefaultOpenSSLBin    = ""
-	DefaultLDLibraryPath = "/opt/tardis/lib"
+	DefaultLDLibraryPath = "/opt/kerr/lib"
 
 	xfsDumpMagic = "xFSdUmP\x00"
 )
@@ -42,7 +42,7 @@ func isSymlinkOpenErr(err error) bool {
 
 func resolveSysBin(name string, extraDirs ...string) (string, error) {
 	searchDirs := append([]string{}, extraDirs...)
-	searchDirs = append(searchDirs, "/opt/tardis/bin", "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/sbin", "/usr/bin", "/bin")
+	searchDirs = append(searchDirs, "/opt/kerr/bin", "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/sbin", "/usr/bin", "/bin")
 	for _, dir := range searchDirs {
 		if dir == "" {
 			continue
@@ -72,7 +72,7 @@ func ResolveSSLRuntime(cfg *Config) (*SSLRuntime, error) {
 	if cfg != nil && strings.TrimSpace(cfg.OpenSSLBin) != "" {
 		candidates = append(candidates, strings.TrimSpace(cfg.OpenSSLBin))
 	} else {
-		for _, c := range []string{"/opt/tardis/bin/openssl", "/usr/local/bin/openssl"} {
+		for _, c := range []string{"/opt/kerr/bin/openssl", "/usr/local/bin/openssl"} {
 			if st, err := os.Stat(c); err == nil && !st.IsDir() && (st.Mode()&0111) != 0 {
 				candidates = append(candidates, c)
 			}
@@ -150,7 +150,7 @@ func ResolveSSLRuntime(cfg *Config) (*SSLRuntime, error) {
 }
 
 func probeCipherSupport(bin, ldPath, cipherFlag string) bool {
-	cmd := exec.Command(bin, "enc", cipherFlag, "-pbkdf2", "-iter", "1000", "-salt", "-e", "-pass", "pass:tardisprobe")
+	cmd := exec.Command(bin, "enc", cipherFlag, "-pbkdf2", "-iter", "1000", "-salt", "-e", "-pass", "pass:kerrprobe")
 	if ldPath != "" {
 		cmd.Env = applyLDLibraryPath(os.Environ(), ldPath)
 	}
@@ -286,7 +286,7 @@ func ValidateDumpMount(mnt *MountInfo) error {
 		return nil
 
 	default:
-		return fmt.Errorf("%s is %s (Linux tardis supports ext2/ext3/ext4 via dump and xfs via xfsdump)", mnt.MountPoint, mnt.FSType)
+		return fmt.Errorf("%s is %s (Linux kerr supports ext2/ext3/ext4 via dump and xfs via xfsdump)", mnt.MountPoint, mnt.FSType)
 	}
 }
 
@@ -353,7 +353,7 @@ func BuildDumpPipeline(ctx context.Context, cfg *Config, mnt *MountInfo, meta Ar
 	if len(sessionLabel) > 250 {
 		sessionLabel = sessionLabel[:250]
 	}
-	mediaLabel := fmt.Sprintf("tardis_L%d", level)
+	mediaLabel := fmt.Sprintf("kerr_L%d", level)
 
 	// xfsdump(8): lone "-" must follow all options and immediately precede the mountpoint (no -f flag).
 	dumpCmd := exec.CommandContext(
@@ -428,7 +428,7 @@ func parseXfsRestoreTOCOutput(r io.Reader, mountPoint string, countAtomic *atomi
 				rel = strings.TrimLeft(rel, "/")
 				rel = strings.TrimRight(rel, "/")
 				if rel != "" && rel != "." &&
-					!strings.HasPrefix(rel, ".tardis_stage_") &&
+					!strings.HasPrefix(rel, ".kerr_stage_") &&
 					!strings.HasPrefix(rel, "xfsrestorehousekeeping") {
 					if _, dup := seen[rel]; !dup {
 						seen[rel] = struct{}{}
@@ -502,7 +502,7 @@ func BuildRestoreCmd(ctx context.Context, magicHeader []byte, stageDir string, m
 	return cmd, nil
 }
 
-// ProbeHostTools reports availability of ext2/3/4 dump/restore and XFS xfsdump/xfsrestore for `tardis -S`.
+// ProbeHostTools reports availability of ext2/3/4 dump/restore and XFS xfsdump/xfsrestore for `kerr -S`.
 func ProbeHostTools() []string {
 	var lines []string
 	for _, item := range [][2]string{

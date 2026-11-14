@@ -20,8 +20,8 @@ export GOARCH="$TARGET_ARCH"
 echo "[1/2] Resolving Go module dependencies (go mod tidy)..."
 go mod tidy
 
-echo "[2/2] Building tardis (${GOOS}/${GOARCH}, CGO_ENABLED=0)..."
-go build -trimpath -ldflags="-s -w" -o tardis .
-chmod 0755 tardis
+echo "[2/2] Building kerr (${GOOS}/${GOARCH}, CGO_ENABLED=0)..."
+go build -trimpath -ldflags="-s -w" -o kerr .
+chmod 0755 kerr
 
-echo "Build complete: ./tardis (${GOOS}/${GOARCH})"
+echo "Build complete: ./kerr (${GOOS}/${GOARCH})"
